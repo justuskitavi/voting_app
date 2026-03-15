@@ -135,7 +135,7 @@ int verifyAdmin() {
 
     printf("\n--- Admin Authentication ---\n");
     printf("Enter Admin Registration Number: ");
-    getchar(); // clear leftover newline from previous scanf
+    getchar(); 
     fgets(inputRegNo, sizeof(inputRegNo), stdin);
     inputRegNo[strcspn(inputRegNo, "\n")] = 0;
 
@@ -229,7 +229,6 @@ void managePositions() {
     printf("\n--- Manage Positions ---\n");
     printf("Enter position names to add (empty line to finish):\n");
 
-    // Clear leftover newline from previous scanf (admin menu choice)
     int ch;
     while((ch = getchar()) != '\n' && ch != EOF) { }
 
@@ -278,7 +277,7 @@ void registerVoter() {
     printf("Enter Name: ");
     getchar();
     fgets(v.name, sizeof(v.name), stdin);
-    v.name[strcspn(v.name, "\n")] = 0; // Remove trailing newline
+    v.name[strcspn(v.name, "\n")] = 0; 
 
     printf("Enter Registration Number: ");
     fgets(v.regNo, sizeof(v.regNo), stdin);
@@ -338,9 +337,9 @@ void registerContestant() {
     printf("\n--- Contestant Registration ---\n");
 
     printf("Enter Name: ");
-    getchar(); // Clear leftover newline
+    getchar(); 
     fgets(c.name, sizeof(c.name), stdin);
-    c.name[strcspn(c.name, "\n")] = 0; // remove newline
+    c.name[strcspn(c.name, "\n")] = 0; 
 
     printf("Enter Registration Number: ");
     fgets(c.regNo, sizeof(c.regNo), stdin);
@@ -373,7 +372,6 @@ void registerContestant() {
 
     fclose(file);
 
-    // Clear leftover newline from scanf before waiting for Enter
     getchar();
 
     printf("Contestant registered successfully!\n");
@@ -460,7 +458,7 @@ void castVote() {
         return;
     }
 
-    char names[100][50]; // store names
+    char names[100][50]; 
     char regNos[100][20];
     char pos[100][30];
     int votes[100];
