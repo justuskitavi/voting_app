@@ -34,8 +34,7 @@ int main(void) {
     server_addr.sin_port   = htons(PORT);
     inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr);
 
-    if(connect(sock, (struct sockaddr *)&server_addr,
-               sizeof(server_addr)) < 0) {
+    if(connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         perror("connect");
         fprintf(stderr, "Make sure the server is running on port %d.\n", PORT);
         exit(1);
