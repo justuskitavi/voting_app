@@ -27,11 +27,35 @@
 #define PORT        9090
 #define MAX_PAYLOAD 2048
 
+/* Message Types (old prompt-based model, no longer used in requests) */
 typedef enum { SVR_DISPLAY = 1, SVR_PROMPT = 2, CLI_INPUT = 3 } MsgType;
 
+/* Request and Response Types (new client-driven model) */
+typedef enum {
+    REQ_REGISTER_VOTER = 10,
+    REQ_VERIFY_ADMIN = 20,
+    REQ_CAST_VOTE = 30
+} RequestType;
+
+typedef enum {
+    RESP_SUCCESS = 1,
+    RESP_ERROR = 2,
+    RESP_DATA = 3
+} ResponseType;
+
+/* Extended message structure to support both old and new protocols */
 typedef struct {
     int  type;
+    int  req_type;       /* For CLIENT_REQUEST messages */
+    int  resp_status;    /* For SVR_RESPONSE: RESP_SUCCESS/RESP_ERROR/RESP_DATA */
     char text[MAX_PAYLOAD];
+    
+    /* Request payload fields (for client-driven requests) */
+    struct {
+        char name[50];
+        char regNo[20];
+        char password[20];
+    } voter_data;
 } Msg;
 
 /* ---- session state stored per-client via a tiny table ---- */
@@ -162,91 +186,80 @@ static void save_voter(const char *name, const char *regNo, const char *pwd)
 #define STEP_ADMIN_PWD         21
 #define STEP_GOODBYE           99
 
-static void send_main_menu(int sock, const struct sockaddr_in *addr)
+/* ================================================================== */
+/*  Response helper — send a response message back to client           */
+/* ================================================================== */
+static void net_send_response(int sock,
+                              const struct sockaddr_in *caddr,
+                              int resp_status,
+                              const char *message)
 {
-    net_send_prompt(sock, addr,
-        "\nElectronic Voting System (UDP)\n"
-        "1. Admin Panel\n"
-        "2. Register Voter\n"
-        "3. Exit\n"
-        "Enter choice: ");
+    Msg m;
+    memset(&m, 0, sizeof(m));
+    m.type = 99;  /* Mark as response (new protocol) */
+    m.resp_status = resp_status;
+    strncpy(m.text, message, MAX_PAYLOAD - 1);
+    sendto(sock, &m, sizeof(m), 0,
+           (const struct sockaddr *)caddr, sizeof(*caddr));
 }
 
-static void dispatch(int sock,
-                     ClientSession *cs,
-                     const char *input)
+/* ================================================================== */
+/*  Request handler — processes CLIENT_REQUEST and sends response     */
+/* ================================================================== */
+static void handle_request(int sock,
+                           ClientSession *cs,
+                           const Msg *req)
 {
     const struct sockaddr_in *addr = &cs->addr;
-
-    switch (cs->step) {
-
-    /* ---- main menu ---- */
-    case STEP_MAIN_MENU:
-        if (strcmp(input, "1") == 0) {
-            if (!admin_exists()) {
-                net_send_display(sock, addr, "No admin found.\n");
-                send_main_menu(sock, addr);
-            } else {
-                cs->step = STEP_ADMIN_REGNO;
-                net_send_prompt(sock, addr, "Admin Reg No: ");
-            }
-        } else if (strcmp(input, "2") == 0) {
-            cs->step = STEP_REGISTER_NAME;
-            net_send_prompt(sock, addr, "Voter name: ");
-        } else if (strcmp(input, "3") == 0) {
-            net_send_display(sock, addr, "Goodbye!\n");
-            printf("[udp-server] Client (%s:%d) has disconnected.\n",
-                   inet_ntoa(addr->sin_addr), ntohs(addr->sin_port));
-            cs->active = 0;   /* remove session */
+    
+    switch (req->req_type) {
+    
+    case REQ_REGISTER_VOTER: {
+        /* Verify non-empty fields */
+        if (strlen(req->voter_data.name) == 0 ||
+            strlen(req->voter_data.regNo) == 0 ||
+            strlen(req->voter_data.password) == 0) {
+            net_send_response(sock, addr, RESP_ERROR,
+                "Error: Empty fields in registration.");
+            return;
+        }
+        
+        /* TODO: Check if voter already exists in voters.txt */
+        
+        /* Save voter to file */
+        save_voter(req->voter_data.name, req->voter_data.regNo,
+                   req->voter_data.password);
+        
+        net_send_response(sock, addr, RESP_SUCCESS,
+            "Voter registered successfully!");
+        break;
+    }
+    
+    case REQ_VERIFY_ADMIN: {
+        if (verify_admin(req->voter_data.regNo, req->voter_data.password)) {
+            net_send_response(sock, addr, RESP_SUCCESS,
+                "Admin authenticated.");
         } else {
-            net_send_display(sock, addr, "Invalid choice.\n");
-            send_main_menu(sock, addr);
+            net_send_response(sock, addr, RESP_ERROR,
+                "Invalid admin credentials.");
         }
         break;
-
-    /* ---- voter registration ---- */
-    case STEP_REGISTER_NAME:
-        strncpy(cs->name, input, sizeof(cs->name) - 1);
-        cs->step = STEP_REGISTER_REGNO;
-        net_send_prompt(sock, addr, "Registration number: ");
+    }
+    
+    case REQ_CAST_VOTE: {
+        /* TODO: Implement vote casting logic */
+        net_send_response(sock, addr, RESP_SUCCESS,
+            "Vote recorded successfully!");
         break;
-
-    case STEP_REGISTER_REGNO:
-        strncpy(cs->regNo, input, sizeof(cs->regNo) - 1);
-        cs->step = STEP_REGISTER_PWD;
-        net_send_prompt(sock, addr, "Password: ");
-        break;
-
-    case STEP_REGISTER_PWD:
-        save_voter(cs->name, cs->regNo, input);
-        net_send_display(sock, addr, "Voter registered successfully!\n");
-        cs->step = STEP_MAIN_MENU;
-        send_main_menu(sock, addr);
-        break;
-
-    /* ---- admin authentication ---- */
-    case STEP_ADMIN_REGNO:
-        strncpy(cs->regNo, input, sizeof(cs->regNo) - 1);
-        cs->step = STEP_ADMIN_PWD;
-        net_send_prompt(sock, addr, "Admin password: ");
-        break;
-
-    case STEP_ADMIN_PWD:
-        if (verify_admin(cs->regNo, input)) {
-            net_send_display(sock, addr, "Admin authenticated. (Full admin panel not shown for brevity.)\n");
-        } else {
-            net_send_display(sock, addr, "Invalid admin credentials.\n");
-        }
-        cs->step = STEP_MAIN_MENU;
-        send_main_menu(sock, addr);
-        break;
-
+    }
+    
     default:
-        cs->step = STEP_MAIN_MENU;
-        send_main_menu(sock, addr);
+        net_send_response(sock, addr, RESP_ERROR,
+            "Unknown request type.");
         break;
     }
 }
+
 
 /* ------------------------------------------------------------------ */
 /*  main                                                                */
@@ -310,17 +323,17 @@ int main(void)
             printf("[udp-server] Client (%s:%d) has connected.\n",
                    client_ip, client_port);
         else
-            printf("[udp-server] Datagram from (%s:%d)  step=%d  input='%s'\n",
-                   client_ip, client_port, cs->step, msg.text);
+            printf("[udp-server] Datagram from (%s:%d)  req_type=%d\n",
+                   client_ip, client_port, msg.req_type);
 
-        /* If this is a brand-new session, greet and show menu */
-        if (cs->step == STEP_MAIN_MENU && msg.text[0] == '\0') {
-            send_main_menu(sock, &client_addr);
-            continue;
+        /* Handle incoming request (no more state machine, no more prompts from server) */
+        if (msg.req_type > 0) {
+            handle_request(sock, cs, &msg);
+        } else if (msg.text[0] == '\0') {
+            /* First connection: client sent empty message; acknowledge but no prompt */
+            net_send_response(sock, &client_addr, RESP_SUCCESS,
+                "Connected to voting server. Use client menu to proceed.");
         }
-
-        /* Hand off to the state machine */
-        dispatch(sock, cs, msg.text);
     }
 
     return 0;

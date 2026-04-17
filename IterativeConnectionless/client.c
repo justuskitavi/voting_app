@@ -26,9 +26,32 @@
 
 typedef enum { SVR_DISPLAY = 1, SVR_PROMPT = 2, CLI_INPUT = 3 } MsgType;
 
+/* Request and Response Types (new client-driven model) */
+typedef enum {
+    REQ_REGISTER_VOTER = 10,
+    REQ_VERIFY_ADMIN = 20,
+    REQ_CAST_VOTE = 30
+} RequestType;
+
+typedef enum {
+    RESP_SUCCESS = 1,
+    RESP_ERROR = 2,
+    RESP_DATA = 3
+} ResponseType;
+
+/* Extended message structure to support both old and new protocols */
 typedef struct {
     int  type;
+    int  req_type;       /* For CLIENT_REQUEST messages */
+    int  resp_status;    /* For SVR_RESPONSE: RESP_SUCCESS/RESP_ERROR/RESP_DATA */
     char text[MAX_PAYLOAD];
+    
+    /* Request payload fields (for client-driven requests) */
+    struct {
+        char name[50];
+        char regNo[20];
+        char password[20];
+    } voter_data;
 } Msg;
 
 int main(void)
@@ -70,55 +93,141 @@ int main(void)
 
     printf("[udp-client] Using connectionless UDP to %s:%d\n", server_ip, PORT);
 
-    /* Send an empty CLI_INPUT to introduce ourselves and trigger the menu */
+    /* Send an initial connection message */
     {
         Msg init;
         memset(&init, 0, sizeof(init));
-        init.type = CLI_INPUT;
-        /* ★ send() works here because connect() set the default peer */
+        init.type = 99;  /* Response message type */
         send(sock, &init, sizeof(init), 0);
     }
 
-    Msg  msg;
-    char input[MAX_PAYLOAD];
-
-    while (1) {
-        /* ★ recv() — receives one UDP datagram from the server */
-        ssize_t n = recv(sock, &msg, sizeof(msg), 0);
-        if (n <= 0) {
-            printf("\n[udp-client] No response (server may have stopped).\n");
+    /* ============================================================ */
+    /*  CLIENT-SIDE STATE MACHINE: Handle all prompting locally     */
+    /* ============================================================ */
+    
+    printf("\n[UDP Voting Client - Client-Driven UI]\n");
+    printf("All prompts are now local to this client.\n");
+    printf("Server only receives requests and sends responses.\n\n");
+    
+    int running = 1;
+    while (running) {
+        /* Display main menu locally (NOT from server) */
+        printf("\n=== Main Menu ===\n");
+        printf("1. Admin Panel\n");
+        printf("2. Register Voter\n");
+        printf("3. Exit\n");
+        printf("Enter choice: ");
+        fflush(stdout);
+        
+        char choice[20];
+        if (fgets(choice, sizeof(choice), stdin) == NULL) {
+            printf("Error reading input.\n");
             break;
         }
-
-        switch (msg.type) {
-
-        case SVR_DISPLAY:
-            printf("%s", msg.text);
+        choice[strcspn(choice, "\n")] = '\0';
+        
+        if (strcmp(choice, "1") == 0) {
+            /* ---- ADMIN PANEL (client-side input collection) ---- */
+            printf("\n=== Admin Panel ===\n");
+            char regNo[20], password[20];
+            
+            printf("Admin Reg No: ");
             fflush(stdout);
-            break;
-
-        case SVR_PROMPT:
-            printf("%s", msg.text);
+            if (fgets(regNo, sizeof(regNo), stdin) == NULL) continue;
+            regNo[strcspn(regNo, "\n")] = '\0';
+            
+            printf("Admin Password: ");
             fflush(stdout);
-
-            if (fgets(input, sizeof(input), stdin) == NULL) {
-                input[0] = '\n'; input[1] = '\0';
+            if (fgets(password, sizeof(password), stdin) == NULL) continue;
+            password[strcspn(password, "\n")] = '\0';
+            
+            /* Validate locally */
+            if (strlen(regNo) == 0 || strlen(password) == 0) {
+                printf("Error: Empty fields. Please try again.\n");
+                continue;
             }
-
-            {
-                Msg reply;
-                memset(&reply, 0, sizeof(reply));
-                reply.type = CLI_INPUT;
-                strncpy(reply.text, input, MAX_PAYLOAD - 1);
-                /* ★ Each send() dispatches an independent UDP datagram.
-                 *   There is no stream; the server reassembles context
-                 *   from its per-client session table. */
-                send(sock, &reply, sizeof(reply), 0);
+            
+            /* Build and send request */
+            Msg req;
+            memset(&req, 0, sizeof(req));
+            req.type = 99;  /* Custom request type */
+            req.req_type = REQ_VERIFY_ADMIN;
+            strncpy(req.voter_data.regNo, regNo, sizeof(req.voter_data.regNo) - 1);
+            strncpy(req.voter_data.password, password, sizeof(req.voter_data.password) - 1);
+            
+            send(sock, &req, sizeof(req), 0);
+            
+            /* Receive response */
+            Msg resp;
+            memset(&resp, 0, sizeof(resp));
+            if (recv(sock, &resp, sizeof(resp), 0) > 0) {
+                printf("\nServer Response: %s\n", resp.text);
+                if (resp.resp_status == RESP_SUCCESS) {
+                    printf("Admin authentication successful.\n");
+                    printf("(Full admin panel not implemented in this demo.)\n");
+                }
+            } else {
+                printf("No response from server.\n");
             }
-            break;
-
-        default:
-            break;
+            
+        } else if (strcmp(choice, "2") == 0) {
+            /* ---- VOTER REGISTRATION (client-side input collection) ---- */
+            printf("\n=== Voter Registration ===\n");
+            char name[50], regNo[20], password[20];
+            
+            printf("Voter name: ");
+            fflush(stdout);
+            if (fgets(name, sizeof(name), stdin) == NULL) continue;
+            name[strcspn(name, "\n")] = '\0';
+            
+            printf("Registration number: ");
+            fflush(stdout);
+            if (fgets(regNo, sizeof(regNo), stdin) == NULL) continue;
+            regNo[strcspn(regNo, "\n")] = '\0';
+            
+            printf("Password: ");
+            fflush(stdout);
+            if (fgets(password, sizeof(password), stdin) == NULL) continue;
+            password[strcspn(password, "\n")] = '\0';
+            
+            /* Validate locally (client-side validation) */
+            if (strlen(name) == 0 || strlen(regNo) == 0 || strlen(password) == 0) {
+                printf("Error: Empty fields. Please try again.\n");
+                continue;
+            }
+            if (strlen(password) < 4) {
+                printf("Error: Password must be at least 4 characters.\n");
+                continue;
+            }
+            
+            /* Build and send request with all data at once */
+            Msg req;
+            memset(&req, 0, sizeof(req));
+            req.type = 99;  /* Custom request type */
+            req.req_type = REQ_REGISTER_VOTER;
+            strncpy(req.voter_data.name, name, sizeof(req.voter_data.name) - 1);
+            strncpy(req.voter_data.regNo, regNo, sizeof(req.voter_data.regNo) - 1);
+            strncpy(req.voter_data.password, password, sizeof(req.voter_data.password) - 1);
+            
+            send(sock, &req, sizeof(req), 0);
+            
+            /* Receive response */
+            Msg resp;
+            memset(&resp, 0, sizeof(resp));
+            if (recv(sock, &resp, sizeof(resp), 0) > 0) {
+                printf("\nServer Response: %s\n", resp.text);
+                if (resp.resp_status == RESP_ERROR) {
+                    printf("(Registration may have failed. Check with server.)\n");
+                }
+            } else {
+                printf("No response from server.\n");
+            }
+            
+        } else if (strcmp(choice, "3") == 0) {
+            printf("Goodbye!\n");
+            running = 0;
+        } else {
+            printf("Invalid choice. Please try again.\n");
         }
     }
 

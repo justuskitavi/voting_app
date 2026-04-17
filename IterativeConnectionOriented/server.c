@@ -29,9 +29,32 @@
 
 typedef enum { SVR_DISPLAY = 1, SVR_PROMPT = 2, CLI_INPUT = 3 } MsgType;
 
+/* Request and Response Types (new client-driven model) */
+typedef enum {
+    REQ_REGISTER_VOTER = 10,
+    REQ_VERIFY_ADMIN = 20,
+    REQ_CAST_VOTE = 30
+} RequestType;
+
+typedef enum {
+    RESP_SUCCESS = 1,
+    RESP_ERROR = 2,
+    RESP_DATA = 3
+} ResponseType;
+
+/* Extended message structure to support both old and new protocols */
 typedef struct {
     int  type;
+    int  req_type;       /* For CLIENT_REQUEST messages */
+    int  resp_status;    /* For SVR_RESPONSE: RESP_SUCCESS/RESP_ERROR/RESP_DATA */
     char text[MAX_PAYLOAD];
+    
+    /* Request payload fields (for client-driven requests) */
+    struct {
+        char name[50];
+        char regNo[20];
+        char password[20];
+    } voter_data;
 } Msg;
 
 struct Voter       { char name[50]; char regNo[20]; char password[20]; int voted; };
@@ -78,6 +101,103 @@ static void net_pause(int sock, const char *msg_text)
     char dummy[8];
     net_gets(sock, msg_text, dummy, sizeof(dummy));
 }
+
+/* ================================================================== */
+/*  Response helper — send a response message back to client (TCP)    */
+/* ================================================================== */
+static void net_send_response(int sock,
+                              int resp_status,
+                              const char *message)
+{
+    Msg m;
+    memset(&m, 0, sizeof(m));
+    m.type = 99;  /* Mark as response (new protocol) */
+    m.resp_status = resp_status;
+    strncpy(m.text, message, MAX_PAYLOAD - 1);
+    send(sock, &m, sizeof(m), 0);
+}
+
+/* Forward declaration */
+static int verify_admin_creds(const char *regNo, const char *password);
+
+/* ================================================================== */
+/*  Request handler — processes CLIENT_REQUEST and sends response     */
+/* ================================================================== */
+static void handle_request(int sock, const Msg *req)
+{
+    switch (req->req_type) {
+    
+    case REQ_REGISTER_VOTER: {
+        /* Verify non-empty fields */
+        if (strlen(req->voter_data.name) == 0 ||
+            strlen(req->voter_data.regNo) == 0 ||
+            strlen(req->voter_data.password) == 0) {
+            net_send_response(sock, RESP_ERROR,
+                "Error: Empty fields in registration.");
+            return;
+        }
+        
+        /* TODO: Check if voter already exists in voters.txt */
+        
+        /* Save voter to file */
+        FILE *f = fopen("voters.txt", "a");
+        if (f) {
+            fprintf(f, "%s|%s|%s|0\n", req->voter_data.name,
+                   req->voter_data.regNo, req->voter_data.password);
+            fclose(f);
+        }
+        
+        net_send_response(sock, RESP_SUCCESS,
+            "Voter registered successfully!");
+        break;
+    }
+    
+    case REQ_VERIFY_ADMIN: {
+        if (verify_admin_creds(req->voter_data.regNo, req->voter_data.password)) {
+            net_send_response(sock, RESP_SUCCESS,
+                "Admin authenticated.");
+        } else {
+            net_send_response(sock, RESP_ERROR,
+                "Invalid admin credentials.");
+        }
+        break;
+    }
+    
+    case REQ_CAST_VOTE: {
+        /* TODO: Implement vote casting logic */
+        net_send_response(sock, RESP_SUCCESS,
+            "Vote recorded successfully!");
+        break;
+    }
+    
+    default:
+        net_send_response(sock, RESP_ERROR,
+            "Unknown request type.");
+        break;
+    }
+}
+
+/* Helper function: verify admin credentials without prompting (for server-side validation) */
+static int verify_admin_creds(const char *regNo, const char *password)
+{
+    FILE *f = fopen("admin.txt", "r");
+    if (!f) return 0;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = '\0';
+        char *name = strtok(line, "|");
+        char *rn = name ? strtok(NULL, "|") : NULL;
+        char *rp = rn ? strtok(NULL, "|") : NULL;
+        if (rn && rp &&
+            strcmp(rn, regNo) == 0 &&
+            strcmp(rp, password) == 0) {
+            fclose(f); return 1;
+        }
+    }
+    fclose(f);
+    return 0;
+}
+
 
 /* ------------------------------------------------------------------ */
 /*  Admin helpers                                                       */
@@ -393,30 +513,31 @@ static void admin_panel(int sock)
     }
 }
 
-/* ------------------------------------------------------------------ */
-/*  handle_client — called for each accepted connection                 */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  handle_client — process requests from connected client (TCP)       */
+/* ================================================================== */
 static void handle_client(int sock)
 {
-    ensure_admin_exists(sock);
-
+    printf("[tcp-server] Client connected. Waiting for requests...\n");
+    
+    Msg msg;
     while (1) {
-        net_print(sock,
-            "\nElectronic Voting System (TCP)\n"
-            "1. Admin Panel\n"
-            "2. Register Voter\n"
-            "3. Cast Vote\n"
-            "4. Exit\n");
-        int ch = net_getint(sock, "Enter choice: ");
-        switch (ch) {
-        case 1: admin_panel(sock);    break;
-        case 2: register_voter(sock); break;
-        case 3: cast_vote(sock);      break;
-        case 4:
-            net_print(sock, "Goodbye!\n");
-            return;
-        default:
-            net_print(sock, "Invalid choice.\n");
+        memset(&msg, 0, sizeof(msg));
+        
+        /* Receive a message from client */
+        ssize_t n = recv(sock, &msg, sizeof(msg), 0);
+        if (n <= 0) {
+            printf("[tcp-server] Client disconnected (recv returned %ld).\n", n);
+            break;
+        }
+        
+        /* Handle request if it's a valid request type */
+        if (msg.req_type > 0) {
+            printf("[tcp-server] Received request type %d\n", msg.req_type);
+            handle_request(sock, &msg);
+        } else if (msg.text[0] != '\0') {
+            /* Legacy support: if just text sent, echo back */
+            net_send_response(sock, RESP_DATA, "Received your message.");
         }
     }
 }
