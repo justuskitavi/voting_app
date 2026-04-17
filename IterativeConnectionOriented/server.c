@@ -464,15 +464,20 @@ int main(void)
                                (struct sockaddr *)&client_addr, &client_len);
         if (client_fd < 0) { perror("accept"); continue; }
 
-        printf("[tcp-server] Client connected from %s:%d\n",
-               inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+        char client_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+        int  client_port = ntohs(client_addr.sin_port);
+
+        printf("[tcp-server] Client (%s:%d) has connected.\n",
+               client_ip, client_port);
 
         handle_client(client_fd);   /* serve the client (may be long) */
 
         /* ★ close() — tear down the TCP connection to this client */
         close(client_fd);
 
-        printf("[tcp-server] Client disconnected. Waiting for next connection...\n");
+        printf("[tcp-server] Client (%s:%d) has disconnected. Waiting for next connection...\n",
+               client_ip, client_port);
         /* ★ Loop back to accept() — next client can now connect */
     }
 

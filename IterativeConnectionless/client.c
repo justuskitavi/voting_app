@@ -16,13 +16,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
 #define PORT        9090
 #define MAX_PAYLOAD 2048
-#define SERVER_IP   "127.0.0.1"   /* change to the server machine's IP */
 
 typedef enum { SVR_DISPLAY = 1, SVR_PROMPT = 2, CLI_INPUT = 3 } MsgType;
 
@@ -33,6 +33,16 @@ typedef struct {
 
 int main(void)
 {
+    /* Prompt the user for the server IP at runtime */
+    char server_ip[64];
+    printf("Enter server IP address: ");
+    fflush(stdout);
+    if (fgets(server_ip, sizeof(server_ip), stdin) == NULL) {
+        fprintf(stderr, "Failed to read IP address.\n");
+        exit(1);
+    }
+    server_ip[strcspn(server_ip, "\r\n")] = '\0';  /* strip newline */
+
     /* ★ CONNECTIONLESS: SOCK_DGRAM = UDP */
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) { perror("socket"); exit(1); }
@@ -41,7 +51,11 @@ int main(void)
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_port   = htons(PORT);
-    inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr);
+
+    if (inet_pton(AF_INET, server_ip, &server_addr.sin_addr) <= 0) {
+        fprintf(stderr, "Invalid IP address: %s\n", server_ip);
+        exit(1);
+    }
 
     /* ★ connect() on a UDP socket does NOT perform a TCP handshake.
      *   It simply stores the server address so that subsequent send()
@@ -50,11 +64,11 @@ int main(void)
     if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         perror("connect");
         fprintf(stderr, "Make sure the UDP server is running on %s:%d\n",
-                SERVER_IP, PORT);
+                server_ip, PORT);
         exit(1);
     }
 
-    printf("[udp-client] Using connectionless UDP to %s:%d\n", SERVER_IP, PORT);
+    printf("[udp-client] Using connectionless UDP to %s:%d\n", server_ip, PORT);
 
     /* Send an empty CLI_INPUT to introduce ourselves and trigger the menu */
     {

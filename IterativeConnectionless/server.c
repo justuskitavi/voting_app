@@ -195,6 +195,8 @@ static void dispatch(int sock,
             net_send_prompt(sock, addr, "Voter name: ");
         } else if (strcmp(input, "3") == 0) {
             net_send_display(sock, addr, "Goodbye!\n");
+            printf("[udp-server] Client (%s:%d) has disconnected.\n",
+                   inet_ntoa(addr->sin_addr), ntohs(addr->sin_port));
             cs->active = 0;   /* remove session */
         } else {
             net_send_display(sock, addr, "Invalid choice.\n");
@@ -288,7 +290,12 @@ int main(void)
         /* Remove trailing newline */
         msg.text[strcspn(msg.text, "\n")] = '\0';
 
+        char client_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+        int  client_port = ntohs(client_addr.sin_port);
+
         /* Look up (or create) a session for this client IP:port */
+        int is_new = 0;
         ClientSession *cs = find_or_create_session(&client_addr);
         if (!cs) {
             /* No room — tell the client and move on */
@@ -296,10 +303,15 @@ int main(void)
             continue;
         }
 
-        printf("[udp-server] Datagram from %s:%d  step=%d  input='%s'\n",
-               inet_ntoa(client_addr.sin_addr),
-               ntohs(client_addr.sin_port),
-               cs->step, msg.text);
+        /* Detect first datagram from this client (step still 0 and session just created) */
+        if (cs->step == 0 && msg.text[0] == '\0') is_new = 1;
+
+        if (is_new)
+            printf("[udp-server] Client (%s:%d) has connected.\n",
+                   client_ip, client_port);
+        else
+            printf("[udp-server] Datagram from (%s:%d)  step=%d  input='%s'\n",
+                   client_ip, client_port, cs->step, msg.text);
 
         /* If this is a brand-new session, greet and show menu */
         if (cs->step == STEP_MAIN_MENU && msg.text[0] == '\0') {
