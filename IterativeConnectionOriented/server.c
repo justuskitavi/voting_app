@@ -1,18 +1,5 @@
 /* =========================================================
  * server_tcp.c  —  CONNECTION-ORIENTED ITERATIVE voting server
- *
- * CONNECTION-ORIENTED aspects (look for the ★ markers):
- *  ★ SOCK_STREAM  – TCP socket
- *  ★ listen()     – places socket in passive mode, allows the OS
- *                   to queue incoming connection requests
- *  ★ accept()     – blocks until a client completes the TCP
- *                   three-way handshake; returns a NEW socket
- *                   dedicated to that single client
- *  ★ recv()/send() on the per-client socket – stream I/O
- *  ★ close(client_fd) – tears down the TCP connection after
- *                        serving the client
- *  ★ ITERATIVE: the server handles ONE client fully before
- *    calling accept() again. No threads or forking.
  * ========================================================= */
 
 #include <stdio.h>
@@ -29,27 +16,29 @@
 
 typedef enum { SVR_DISPLAY = 1, SVR_PROMPT = 2, CLI_INPUT = 3 } MsgType;
 
-/* Request and Response Types (new client-driven model) */
 typedef enum {
-    REQ_REGISTER_VOTER = 10,
-    REQ_VERIFY_ADMIN = 20,
-    REQ_CAST_VOTE = 30
+    REQ_REGISTER_VOTER    = 10,
+    REQ_VERIFY_ADMIN      = 20,
+    REQ_CAST_VOTE         = 30,
+    REQ_MANAGE_POSITIONS  = 40,
+    REQ_REG_CONTESTANT    = 50,
+    REQ_TALLY_VOTES       = 60,
+    REQ_VIEW_ADMIN_INFO   = 70,
+    REQ_ENSURE_ADMIN      = 80,
+    REQ_ADMIN_BACK        = 90
 } RequestType;
 
 typedef enum {
     RESP_SUCCESS = 1,
-    RESP_ERROR = 2,
-    RESP_DATA = 3
+    RESP_ERROR   = 2,
+    RESP_DATA    = 3
 } ResponseType;
 
-/* Extended message structure to support both old and new protocols */
 typedef struct {
     int  type;
-    int  req_type;       /* For CLIENT_REQUEST messages */
-    int  resp_status;    /* For SVR_RESPONSE: RESP_SUCCESS/RESP_ERROR/RESP_DATA */
+    int  req_type;
+    int  resp_status;
     char text[MAX_PAYLOAD];
-    
-    /* Request payload fields (for client-driven requests) */
     struct {
         char name[50];
         char regNo[20];
@@ -57,20 +46,21 @@ typedef struct {
     } voter_data;
 } Msg;
 
-struct Voter       { char name[50]; char regNo[20]; char password[20]; int voted; };
-struct Contestant  { char name[50]; char regNo[20]; char position[30]; int votes; };
-struct Admin       { char name[50]; char regNo[20]; char password[20]; };
+struct Voter      { char name[50]; char regNo[20]; char password[20]; int voted; };
+struct Contestant { char name[50]; char regNo[20]; char position[30]; int votes; };
+struct Admin      { char name[50]; char regNo[20]; char password[20]; };
 
-/* ------------------------------------------------------------------ */
-/*  Stream helpers — identical to original; work on the per-client fd  */
-/* ------------------------------------------------------------------ */
-
+/* ================================================================== */
+/*  Net helpers                                                        */
+/* ================================================================== */
 static void net_print(int sock, const char *fmt, ...)
 {
     Msg m; va_list ap;
     memset(&m, 0, sizeof(m));
     m.type = SVR_DISPLAY;
-    va_start(ap, fmt); vsnprintf(m.text, MAX_PAYLOAD, fmt, ap); va_end(ap);
+    va_start(ap, fmt);
+    vsnprintf(m.text, MAX_PAYLOAD, fmt, ap);
+    va_end(ap);
     send(sock, &m, sizeof(m), 0);
 }
 
@@ -102,82 +92,22 @@ static void net_pause(int sock, const char *msg_text)
     net_gets(sock, msg_text, dummy, sizeof(dummy));
 }
 
-/* ================================================================== */
-/*  Response helper — send a response message back to client (TCP)    */
-/* ================================================================== */
-static void net_send_response(int sock,
-                              int resp_status,
-                              const char *message)
+/* Send a final response (resp_status set) back to the client */
+static void net_response(int sock, int status, const char *fmt, ...)
 {
-    Msg m;
+    Msg m; va_list ap;
     memset(&m, 0, sizeof(m));
-    m.type = 99;  /* Mark as response (new protocol) */
-    m.resp_status = resp_status;
-    strncpy(m.text, message, MAX_PAYLOAD - 1);
+    m.type        = 99;
+    m.resp_status = status;
+    va_start(ap, fmt);
+    vsnprintf(m.text, MAX_PAYLOAD, fmt, ap);
+    va_end(ap);
     send(sock, &m, sizeof(m), 0);
 }
 
-/* Forward declaration */
-static int verify_admin_creds(const char *regNo, const char *password);
-
 /* ================================================================== */
-/*  Request handler — processes CLIENT_REQUEST and sends response     */
+/*  Admin helpers                                                      */
 /* ================================================================== */
-static void handle_request(int sock, const Msg *req)
-{
-    switch (req->req_type) {
-    
-    case REQ_REGISTER_VOTER: {
-        /* Verify non-empty fields */
-        if (strlen(req->voter_data.name) == 0 ||
-            strlen(req->voter_data.regNo) == 0 ||
-            strlen(req->voter_data.password) == 0) {
-            net_send_response(sock, RESP_ERROR,
-                "Error: Empty fields in registration.");
-            return;
-        }
-        
-        /* TODO: Check if voter already exists in voters.txt */
-        
-        /* Save voter to file */
-        FILE *f = fopen("voters.txt", "a");
-        if (f) {
-            fprintf(f, "%s|%s|%s|0\n", req->voter_data.name,
-                   req->voter_data.regNo, req->voter_data.password);
-            fclose(f);
-        }
-        
-        net_send_response(sock, RESP_SUCCESS,
-            "Voter registered successfully!");
-        break;
-    }
-    
-    case REQ_VERIFY_ADMIN: {
-        if (verify_admin_creds(req->voter_data.regNo, req->voter_data.password)) {
-            net_send_response(sock, RESP_SUCCESS,
-                "Admin authenticated.");
-        } else {
-            net_send_response(sock, RESP_ERROR,
-                "Invalid admin credentials.");
-        }
-        break;
-    }
-    
-    case REQ_CAST_VOTE: {
-        /* TODO: Implement vote casting logic */
-        net_send_response(sock, RESP_SUCCESS,
-            "Vote recorded successfully!");
-        break;
-    }
-    
-    default:
-        net_send_response(sock, RESP_ERROR,
-            "Unknown request type.");
-        break;
-    }
-}
-
-/* Helper function: verify admin credentials without prompting (for server-side validation) */
 static int verify_admin_creds(const char *regNo, const char *password)
 {
     FILE *f = fopen("admin.txt", "r");
@@ -186,10 +116,10 @@ static int verify_admin_creds(const char *regNo, const char *password)
     while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\n")] = '\0';
         char *name = strtok(line, "|");
-        char *rn = name ? strtok(NULL, "|") : NULL;
-        char *rp = rn ? strtok(NULL, "|") : NULL;
+        char *rn   = name ? strtok(NULL, "|") : NULL;
+        char *rp   = rn   ? strtok(NULL, "|") : NULL;
         if (rn && rp &&
-            strcmp(rn, regNo) == 0 &&
+            strcmp(rn, regNo)    == 0 &&
             strcmp(rp, password) == 0) {
             fclose(f); return 1;
         }
@@ -198,105 +128,71 @@ static int verify_admin_creds(const char *regNo, const char *password)
     return 0;
 }
 
-
-/* ------------------------------------------------------------------ */
-/*  Admin helpers                                                       */
-/* ------------------------------------------------------------------ */
-static void ensure_admin_exists(int sock)
-{
-    FILE *f = fopen("admin.txt", "r");
-    char  line[256];
-    if (!f || !fgets(line, sizeof(line), f)) {
-        if (f) fclose(f);
-        /* create admin */
-        net_print(sock, "\nNo admin found. Creating admin account.\n");
-        f = fopen("admin.txt", "w");
-        if (!f) { net_print(sock, "Error creating admin file.\n"); return; }
-        struct Admin a;
-        net_gets(sock, "Admin Name: ",       a.name,     sizeof(a.name));
-        net_gets(sock, "Admin Reg No: ",     a.regNo,    sizeof(a.regNo));
-        net_gets(sock, "Admin Password: ",   a.password, sizeof(a.password));
-        fprintf(f, "%s|%s|%s\n", a.name, a.regNo, a.password);
-        fclose(f);
-        net_print(sock, "Admin created.\n");
-        return;
-    }
-    fclose(f);
-}
-
+/* Prompt over the network and verify — returns 1 on success */
 static int verify_admin(int sock)
 {
-    char inputRegNo[20], inputPwd[20];
-    net_gets(sock, "Admin Reg No: ",  inputRegNo, sizeof(inputRegNo));
-    net_gets(sock, "Admin Password: ", inputPwd,  sizeof(inputPwd));
+    char regNo[20], pwd[20];
+    net_gets(sock, "Admin Reg No: ",   regNo, sizeof(regNo));
+    net_gets(sock, "Admin Password: ", pwd,   sizeof(pwd));
 
-    FILE *f = fopen("admin.txt", "r");
-    if (!f) { net_print(sock, "Admin file missing.\n"); return 0; }
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
-        line[strcspn(line, "\n")] = '\0';
-        char *r = strtok(line, "|"); /* name */
-        char *rn = r ? strtok(NULL, "|") : NULL;
-        char *rp = rn ? strtok(NULL, "|") : NULL;
-        if (rn && rp &&
-            strcmp(rn, inputRegNo) == 0 &&
-            strcmp(rp, inputPwd)   == 0) {
-            fclose(f); return 1;
-        }
-    }
-    fclose(f);
+    if (verify_admin_creds(regNo, pwd)) return 1;
+
     net_print(sock, "Invalid admin credentials.\n");
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Voter registration                                                  */
-/* ------------------------------------------------------------------ */
-static void register_voter(int sock)
+static void ensure_admin_exists(int sock)
 {
-    struct Voter v;
-    net_print(sock, "\n--- Voter Registration ---\n");
-    net_gets(sock, "Name: ",         v.name,     sizeof(v.name));
-    net_gets(sock, "Reg No: ",       v.regNo,    sizeof(v.regNo));
-    net_gets(sock, "Password: ",     v.password, sizeof(v.password));
-    v.voted = 0;
+    FILE *f    = fopen("admin.txt", "r");
+    char  line[256];
+    if (f && fgets(line, sizeof(line), f)) { fclose(f); return; }
+    if (f) fclose(f);
 
-    FILE *f = fopen("voters.txt", "a");
-    if (!f) { net_print(sock, "Error opening voter file.\n"); return; }
-    fprintf(f, "%s|%s|%s|%d\n", v.name, v.regNo, v.password, v.voted);
+    net_print(sock, "\nNo admin found. Please create an admin account.\n");
+
+    f = fopen("admin.txt", "w");
+    if (!f) { net_print(sock, "Error creating admin file.\n"); return; }
+
+    struct Admin a;
+    net_gets(sock, "Admin Name: ",     a.name,     sizeof(a.name));
+    net_gets(sock, "Admin Reg No: ",   a.regNo,    sizeof(a.regNo));
+    net_gets(sock, "Admin Password: ", a.password, sizeof(a.password));
+    fprintf(f, "%s|%s|%s\n", a.name, a.regNo, a.password);
     fclose(f);
-    net_print(sock, "Voter registered successfully!\n");
-    net_pause(sock, "Press Enter to continue...");
+    net_print(sock, "Admin created successfully.\n");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Manage positions                                                    */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Admin sub-functions                                                */
+/* ================================================================== */
 static void manage_positions(int sock)
 {
     FILE *f = fopen("positions.txt", "a");
-    char  pos[30];
-    if (!f) { net_print(sock, "Error opening positions file.\n"); return; }
-    net_print(sock, "\n--- Manage Positions (empty line to finish) ---\n");
+    if (!f) { net_response(sock, RESP_ERROR, "Error opening positions file."); return; }
+
+    net_print(sock, "\n--- Manage Positions ---\n");
+    net_print(sock, "Enter position names (empty line to finish):\n");
+
+    char pos[30];
     while (1) {
         net_gets(sock, "Position: ", pos, sizeof(pos));
         if (strlen(pos) == 0) break;
         fprintf(f, "%s\n", pos);
+        net_print(sock, "Position '%s' added.\n", pos);
     }
     fclose(f);
-    net_print(sock, "Positions updated.\n");
+    net_response(sock, RESP_SUCCESS, "Positions updated successfully.");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Register contestant                                                 */
-/* ------------------------------------------------------------------ */
 static void register_contestant(int sock)
 {
-    char  line[256];
-    char  positions[100][30];
-    int   posCount = 0;
+    char line[256];
+    char positions[100][30];
+    int  posCount = 0;
+
     FILE *pf = fopen("positions.txt", "r");
-    if (!pf) { net_print(sock, "No positions found.\n"); return; }
+    if (!pf) { net_response(sock, RESP_ERROR, "No positions found. Create positions first."); return; }
+
     while (fgets(line, sizeof(line), pf) && posCount < 100) {
         line[strcspn(line, "\n")] = '\0';
         if (!strlen(line)) continue;
@@ -305,46 +201,47 @@ static void register_contestant(int sock)
         posCount++;
     }
     fclose(pf);
-    if (!posCount) { net_print(sock, "No positions defined.\n"); return; }
+
+    if (!posCount) { net_response(sock, RESP_ERROR, "No positions defined."); return; }
 
     struct Contestant c;
     net_print(sock, "\n--- Contestant Registration ---\n");
     net_gets(sock, "Name: ",   c.name,  sizeof(c.name));
     net_gets(sock, "Reg No: ", c.regNo, sizeof(c.regNo));
 
-    net_print(sock, "\nAvailable positions:\n");
+    /* Display available positions */
+    net_print(sock, "\nAvailable Positions:\n");
     for (int i = 0; i < posCount; i++)
         net_print(sock, "%d. %s\n", i + 1, positions[i]);
 
-    int choice = net_getint(sock, "Select position: ");
+    int choice = net_getint(sock, "Select position number: ");
     if (choice < 1 || choice > posCount) {
-        net_print(sock, "Invalid choice.\n"); return;
+        net_response(sock, RESP_ERROR, "Invalid position choice."); return;
     }
     strncpy(c.position, positions[choice - 1], sizeof(c.position) - 1);
+    c.position[sizeof(c.position) - 1] = '\0';
     c.votes = 0;
 
     FILE *cf = fopen("contestants.txt", "a");
-    if (!cf) { net_print(sock, "Error opening contestants file.\n"); return; }
+    if (!cf) { net_response(sock, RESP_ERROR, "Error opening contestants file."); return; }
     fprintf(cf, "%s|%s|%s|%d\n", c.name, c.regNo, c.position, c.votes);
     fclose(cf);
-    net_print(sock, "Contestant registered!\n");
-    net_pause(sock, "Press Enter to continue...");
+
+    net_response(sock, RESP_SUCCESS,
+        "Contestant '%s' registered for position '%s'.", c.name, c.position);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Tally votes                                                         */
-/* ------------------------------------------------------------------ */
 static void tally_votes(int sock)
 {
     FILE *f = fopen("contestants.txt", "r");
-    if (!f) { net_print(sock, "No contestants found.\n"); return; }
+    if (!f) { net_response(sock, RESP_ERROR, "No contestants found."); return; }
 
     char line[256];
-    int  maxVotes = 0;
-    struct Contestant c;
+    int  maxVotes = -1;
 
     net_print(sock, "\n--- Election Results ---\n\nVote Counts:\n");
 
+    /* First pass: print all + find max */
     while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\n")] = '\0';
         char *n  = strtok(line, "|");
@@ -353,10 +250,12 @@ static void tally_votes(int sock)
         char *v  = strtok(NULL, "|");
         if (!n || !r || !p || !v) continue;
         int votes = atoi(v);
-        net_print(sock, "%s (%s) for %s — %d votes\n", n, r, p, votes);
+        net_print(sock, "  %-20s (%-10s) for %-20s — %d votes\n",
+                  n, r, p, votes);
         if (votes > maxVotes) maxVotes = votes;
     }
 
+    /* Second pass: announce winner(s) */
     fseek(f, 0, SEEK_SET);
     net_print(sock, "\nWinner(s):\n");
     while (fgets(line, sizeof(line), f)) {
@@ -367,187 +266,178 @@ static void tally_votes(int sock)
         char *v  = strtok(NULL, "|");
         if (!n || !r || !p || !v) continue;
         if (atoi(v) == maxVotes)
-            net_print(sock, "%s (%s) for %s\n", n, r, p);
+            net_print(sock, "  ★ %s (%s) for %s with %d vote(s)\n",
+                      n, r, p, maxVotes);
     }
     fclose(f);
-    net_pause(sock, "\nPress Enter to return to menu...");
+    net_response(sock, RESP_SUCCESS, "Tally complete.");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Cast vote                                                           */
-/* ------------------------------------------------------------------ */
-static void cast_vote(int sock)
+static void view_admin_info(int sock)
 {
-    char regNo[20], password[20];
+    net_print(sock, "\n--- Admin Info ---\n");
+
+    char regNo[20], pwd[20];
+    net_gets(sock, "Admin Reg No: ",   regNo, sizeof(regNo));
+    net_gets(sock, "Admin Password: ", pwd,   sizeof(pwd));
+
+    if (!verify_admin_creds(regNo, pwd)) {
+        net_response(sock, RESP_ERROR, "Invalid admin credentials.");
+        return;
+    }
+
+    FILE *f = fopen("admin.txt", "r");
+    if (!f) { net_response(sock, RESP_ERROR, "Cannot open admin file."); return; }
+
     char line[256];
-
-    net_print(sock, "\n--- Cast Vote ---\n");
-    net_gets(sock, "Reg No: ",   regNo,    sizeof(regNo));
-    net_gets(sock, "Password: ", password, sizeof(password));
-
-    /* verify voter */
-    FILE *vf = fopen("voters.txt", "r");
-    if (!vf) { net_print(sock, "Error opening voter file.\n"); return; }
-
-    int found = 0, alreadyVoted = 0;
-    struct Voter v;
-    while (fgets(line, sizeof(line), vf)) {
+    while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\n")] = '\0';
-        char *n = strtok(line, "|");
-        char *r = strtok(NULL, "|");
-        char *p = strtok(NULL, "|");
-        char *vt = strtok(NULL, "|");
-        if (!n || !r || !p || !vt) continue;
-        if (strcmp(r, regNo) == 0 && strcmp(p, password) == 0) {
-            found = 1;
-            if (atoi(vt) == 1) alreadyVoted = 1;
+        char *name = strtok(line, "|");
+        char *rn   = name ? strtok(NULL, "|") : NULL;
+        /* password intentionally not sent back over the wire */
+        if (name && rn && strcmp(rn, regNo) == 0) {
+            net_print(sock, "Name   : %s\n", name);
+            net_print(sock, "Reg No : %s\n", rn);
+            break;
         }
     }
-    fclose(vf);
+    fclose(f);
+    net_response(sock, RESP_SUCCESS, "Admin info displayed.");
+}
 
-    if (!found)        { net_print(sock, "Invalid credentials.\n"); return; }
-    if (alreadyVoted)  { net_print(sock, "You have already voted.\n"); return; }
-
-    /* load contestants */
-    FILE *cf = fopen("contestants.txt", "r");
-    if (!cf) { net_print(sock, "No contestants.\n"); return; }
-
-    char names[100][50], regNos[100][20], pos[100][30];
-    int  votes[100], count = 0;
-    struct Contestant c;
-    while (fgets(line, sizeof(line), cf) && count < 100) {
-        line[strcspn(line, "\n")] = '\0';
-        char *n = strtok(line, "|");
-        char *r = strtok(NULL, "|");
-        char *p = strtok(NULL, "|");
-        char *vt = strtok(NULL, "|");
-        if (!n || !r || !p || !vt) continue;
-        strncpy(names[count], n, 49); names[count][49] = '\0';
-        strncpy(regNos[count], r, 19); regNos[count][19] = '\0';
-        strncpy(pos[count], p, 29); pos[count][29] = '\0';
-        votes[count] = atoi(vt);
-        count++;
-    }
-    fclose(cf);
-
-    /* load positions */
-    FILE *pf = fopen("positions.txt", "r");
-    if (!pf) { net_print(sock, "No positions.\n"); return; }
-    char positions[100][30]; int posCount = 0;
-    while (fgets(line, sizeof(line), pf) && posCount < 100) {
-        line[strcspn(line, "\n")] = '\0';
-        if (!strlen(line)) continue;
-        strncpy(positions[posCount], line, 29);
-        positions[posCount][29] = '\0';
-        posCount++;
-    }
-    fclose(pf);
-
-    for (int pi = 0; pi < posCount; pi++) {
-        int cIdx[100], cCount = 0;
-        net_print(sock, "\nPosition: %s\n", positions[pi]);
-        for (int j = 0; j < count; j++)
-            if (strcmp(pos[j], positions[pi]) == 0) cIdx[cCount++] = j;
-        if (!cCount) { net_print(sock, "No candidates.\n"); continue; }
-        for (int k = 0; k < cCount; k++)
-            net_print(sock, "%d. %s (%s)\n", k + 1, names[cIdx[k]], regNos[cIdx[k]]);
-        int ch = net_getint(sock, "Vote (0 to skip): ");
-        if (ch >= 1 && ch <= cCount) votes[cIdx[ch - 1]]++;
+/* ================================================================== */
+/*  Voter registration (server-side, triggered by REQ_REGISTER_VOTER) */
+/* ================================================================== */
+static void handle_register_voter(int sock, const Msg *req)
+{
+    if (!strlen(req->voter_data.name)     ||
+        !strlen(req->voter_data.regNo)    ||
+        !strlen(req->voter_data.password)) {
+        net_response(sock, RESP_ERROR, "Error: Empty fields in registration.");
+        return;
     }
 
-    /* rewrite contestants */
-    cf = fopen("contestants.txt", "w");
-    if (cf) {
-        for (int j = 0; j < count; j++)
-            fprintf(cf, "%s|%s|%s|%d\n", names[j], regNos[j], pos[j], votes[j]);
-        fclose(cf);
-    }
-
-    /* mark voter as voted */
-    vf = fopen("voters.txt", "r");
-    FILE *tmp = fopen("voters_temp.txt", "w");
-    if (vf && tmp) {
-        while (fgets(line, sizeof(line), vf)) {
+    /* Check for duplicate */
+    FILE *f = fopen("voters.txt", "r");
+    if (f) {
+        char line[256];
+        while (fgets(line, sizeof(line), f)) {
             line[strcspn(line, "\n")] = '\0';
-            char *n = strtok(line, "|");
-            char *r = strtok(NULL, "|");
-            char *p = strtok(NULL, "|");
-            char *vt = strtok(NULL, "|");
-            if (!n || !r || !p || !vt) continue;
-            int voted = atoi(vt);
-            if (strcmp(r, regNo) == 0 && strcmp(p, password) == 0) voted = 1;
-            fprintf(tmp, "%s|%s|%s|%d\n", n, r, p, voted);
+            strtok(line, "|");                    /* name  */
+            char *rn = strtok(NULL, "|");         /* regNo */
+            if (rn && strcmp(rn, req->voter_data.regNo) == 0) {
+                fclose(f);
+                net_response(sock, RESP_ERROR,
+                    "Voter with Reg No '%s' already exists.",
+                    req->voter_data.regNo);
+                return;
+            }
         }
-        fclose(vf); fclose(tmp);
-        remove("voters.txt");
-        rename("voters_temp.txt", "voters.txt");
+        fclose(f);
     }
 
-    net_print(sock, "Vote cast successfully!\n");
+    f = fopen("voters.txt", "a");
+    if (!f) { net_response(sock, RESP_ERROR, "Error opening voter file."); return; }
+    fprintf(f, "%s|%s|%s|0\n",
+            req->voter_data.name,
+            req->voter_data.regNo,
+            req->voter_data.password);
+    fclose(f);
+    net_response(sock, RESP_SUCCESS,
+        "Voter '%s' registered successfully!", req->voter_data.name);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Admin panel                                                         */
-/* ------------------------------------------------------------------ */
-static void admin_panel(int sock)
+/* ================================================================== */
+/*  Admin panel — server side: verify first, then handle sub-requests */
+/* ================================================================== */
+static void handle_admin_panel(int sock)
 {
-    net_print(sock, "\n--- Admin Panel ---\n");
+    net_print(sock, "\n--- Admin Authentication ---\n");
+
     if (!verify_admin(sock)) {
-        net_print(sock, "Authentication failed.\n"); return;
+        net_response(sock, RESP_ERROR, "Admin authentication failed.");
+        return;
     }
-    while (1) {
-        net_print(sock,
-            "\nAdmin Options:\n"
-            "1. Manage Positions\n"
-            "2. Register Contestant\n"
-            "3. Tally Votes\n"
-            "4. Back\n");
-        int ch = net_getint(sock, "Choice: ");
-        switch (ch) {
-        case 1: manage_positions(sock);    break;
-        case 2: register_contestant(sock); break;
-        case 3: tally_votes(sock);         break;
-        case 4: return;
-        default: net_print(sock, "Invalid.\n");
-        }
-    }
-}
 
-/* ================================================================== */
-/*  handle_client — process requests from connected client (TCP)       */
-/* ================================================================== */
-static void handle_client(int sock)
-{
-    printf("[tcp-server] Client connected. Waiting for requests...\n");
-    
+    /* Auth succeeded — tell the client */
+    net_response(sock, RESP_SUCCESS, "Admin authenticated successfully.");
+
+    /*
+     * Now wait for sub-menu requests from the client.
+     * The client prints its own menu and sends REQ_* messages.
+     * We serve each one and send a final net_response() back.
+     * The loop ends when the client sends nothing more (disconnects or
+     * picks "Back to Main Menu" — at that point the outer handle_client
+     * loop just waits for the next top-level request).
+     */
     Msg msg;
     while (1) {
         memset(&msg, 0, sizeof(msg));
-        
-        /* Receive a message from client */
         ssize_t n = recv(sock, &msg, sizeof(msg), 0);
-        if (n <= 0) {
-            printf("[tcp-server] Client disconnected (recv returned %ld).\n", n);
+        if (n <= 0) break;  /* client disconnected or went back */
+
+        switch (msg.req_type) {
+        case REQ_MANAGE_POSITIONS: manage_positions(sock);    break;
+        case REQ_REG_CONTESTANT:   register_contestant(sock); break;
+        case REQ_TALLY_VOTES:      tally_votes(sock);         break;
+        case REQ_VIEW_ADMIN_INFO:  view_admin_info(sock);     break;
+        case REQ_ADMIN_BACK:
+            net_response(sock, RESP_SUCCESS, "Returning to main menu.");
+            goto done;
+        default:
+            /* Not an admin sub-request — break back to main loop */
+            net_response(sock, RESP_ERROR, "Invalid admin request.");
             break;
         }
-        
-        /* Handle request if it's a valid request type */
-        if (msg.req_type > 0) {
-            printf("[tcp-server] Received request type %d\n", msg.req_type);
-            handle_request(sock, &msg);
-        } else if (msg.text[0] != '\0') {
-            /* Legacy support: if just text sent, echo back */
-            net_send_response(sock, RESP_DATA, "Received your message.");
+    }
+done:;
+}
+
+/* ================================================================== */
+/*  Main client handler                                                */
+/* ================================================================== */
+static void handle_client(int sock)
+{
+    printf("[tcp-server] Client connected.\n");
+
+    Msg msg;
+    while (1) {
+        memset(&msg, 0, sizeof(msg));
+        ssize_t n = recv(sock, &msg, sizeof(msg), 0);
+        if (n <= 0) {
+            printf("[tcp-server] Client disconnected.\n");
+            break;
+        }
+
+        printf("[tcp-server] Request type: %d\n", msg.req_type);
+
+        switch (msg.req_type) {
+        case REQ_ENSURE_ADMIN:
+            ensure_admin_exists(sock);
+            /* Send a plain response so pump_until_response() returns */
+            net_response(sock, RESP_SUCCESS, "");
+            break;
+
+        case REQ_VERIFY_ADMIN:
+            handle_admin_panel(sock);
+            break;
+
+        case REQ_REGISTER_VOTER:
+            handle_register_voter(sock, &msg);
+            break;
+
+        default:
+            net_response(sock, RESP_ERROR, "Unknown request.");
+            break;
         }
     }
 }
 
-/* ------------------------------------------------------------------ */
-/*  main                                                                */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  main                                                               */
+/* ================================================================== */
 int main(void)
 {
-    /* ★ CONNECTION-ORIENTED: SOCK_STREAM = TCP */
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) { perror("socket"); exit(1); }
 
@@ -564,42 +454,26 @@ int main(void)
         perror("bind"); exit(1);
     }
 
-    /* ★ listen() — puts the socket in passive mode.
-     *   The OS will complete the TCP three-way handshake on behalf of
-     *   the server for up to 1 pending connection at a time. */
     if (listen(server_fd, 1) < 0) { perror("listen"); exit(1); }
 
-    printf("[tcp-server] Listening on port %d (connection-oriented iterative)...\n", PORT);
+    printf("[tcp-server] Listening on port %d...\n", PORT);
 
-    /* ★ CONNECTION-ORIENTED ITERATIVE server loop:
-     *   accept() blocks until one client has completed the TCP handshake.
-     *   It returns a NEW socket (client_fd) specific to that connection.
-     *   We serve that client fully, then close client_fd and loop back
-     *   to accept() for the next client. */
     while (1) {
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
-
-        /* ★ accept() — returns per-client socket; TCP handshake complete */
         int client_fd = accept(server_fd,
                                (struct sockaddr *)&client_addr, &client_len);
         if (client_fd < 0) { perror("accept"); continue; }
 
-        char client_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-        int  client_port = ntohs(client_addr.sin_port);
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
+        printf("[tcp-server] Client (%s:%d) connected.\n",
+               ip, ntohs(client_addr.sin_port));
 
-        printf("[tcp-server] Client (%s:%d) has connected.\n",
-               client_ip, client_port);
+        handle_client(client_fd);
 
-        handle_client(client_fd);   /* serve the client (may be long) */
-
-        /* ★ close() — tear down the TCP connection to this client */
         close(client_fd);
-
-        printf("[tcp-server] Client (%s:%d) has disconnected. Waiting for next connection...\n",
-               client_ip, client_port);
-        /* ★ Loop back to accept() — next client can now connect */
+        printf("[tcp-server] Client disconnected. Waiting...\n");
     }
 
     close(server_fd);

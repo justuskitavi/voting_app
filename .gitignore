@@ -1,4 +1,12 @@
 client
 server
 
+/IterativeConnectionless/client
+/IterativeConnectionless/server
+/IterativeConnectionless/client_check
+
+/IterativeConnectionOriented/client
+/IterativeConnectionOriented/server
+/IterativeConnectionOriented/client_check
+
 *.txt

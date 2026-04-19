@@ -70,6 +70,84 @@ void save_voter(const char *name, const char *regNo, const char *pwd)
     fclose(f);
 }
 
+void add_position(const char *position)
+{
+    FILE *f = fopen("positions.txt", "a");
+    if (!f) return;
+
+    fprintf(f, "%s\n", position);
+    fclose(f);
+}
+
+void save_contestant(const char *name, const char *regNo, const char *position)
+{
+    FILE *f = fopen("contestants.txt", "a");
+    if (!f) return;
+
+    fprintf(f, "%s|%s|%s|0\n", name, regNo, position);
+    fclose(f);
+}
+
+void get_tally_results(char *response)
+{
+    FILE *f = fopen("contestants.txt", "r");
+    char line[256];
+    char result[2000] = "--- Election Results ---\n";
+
+    if (!f) {
+        strcpy(response, "ERROR: No contestants found");
+        return;
+    }
+
+    strcat(result, "Vote Counts:\n");
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = '\0';
+        char *name = strtok(line, "|");
+        char *regNo = strtok(NULL, "|");
+        char *position = strtok(NULL, "|");
+        char *votes = strtok(NULL, "|");
+
+        if (name && regNo && position && votes) {
+            char entry[256];
+            snprintf(entry, sizeof(entry), "%s (%s) for %s - %d votes\n",
+                     name, regNo, position, atoi(votes));
+            strcat(result, entry);
+        }
+    }
+
+    fclose(f);
+    strcpy(response, result);
+}
+
+void get_admin_info(const char *regNo, const char *pwd, char *response)
+{
+    FILE *f = fopen("admin.txt", "r");
+    char line[256];
+
+    if (!f) {
+        strcpy(response, "ERROR: Admin file not found");
+        return;
+    }
+
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = '\0';
+        char *name = strtok(line, "|");
+        char *r = strtok(NULL, "|");
+        char *p = strtok(NULL, "|");
+
+        if (r && p && strcmp(r, regNo) == 0 && strcmp(p, pwd) == 0) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "Admin: %s | Reg No: %s | Password: %s", name, r, p);
+            strcpy(response, msg);
+            fclose(f);
+            return;
+        }
+    }
+
+    fclose(f);
+    strcpy(response, "ERROR: Admin not found");
+}
+
 /* =========================================================
  * MAIN SERVER
  * ========================================================= */
@@ -170,6 +248,111 @@ int main(void)
                 sendto(sock, msg, strlen(msg)+1, 0,
                        (struct sockaddr *)&client_addr, client_len);
             }
+        }
+
+        /* =====================================================
+         * ADD POSITION
+         * ===================================================== */
+        else if (strcmp(command, "ADD_POSITION") == 0) {
+            char *regNo = strtok(NULL, "|");
+            char *password = strtok(NULL, "|");
+            char *position = strtok(NULL, "|");
+
+            if (!regNo || !password || !position) {
+                char *msg = "ERROR: Invalid position format";
+                sendto(sock, msg, strlen(msg)+1, 0,
+                       (struct sockaddr *)&client_addr, client_len);
+                continue;
+            }
+
+            if (!verify_admin(regNo, password)) {
+                char *msg = "ERROR: Admin not authenticated";
+                sendto(sock, msg, strlen(msg)+1, 0,
+                       (struct sockaddr *)&client_addr, client_len);
+                continue;
+            }
+
+            add_position(position);
+            char *msg = "SUCCESS: Position added";
+            sendto(sock, msg, strlen(msg)+1, 0,
+                   (struct sockaddr *)&client_addr, client_len);
+        }
+
+        /* =====================================================
+         * REGISTER CONTESTANT
+         * ===================================================== */
+        else if (strcmp(command, "REGISTER_CONTESTANT") == 0) {
+            char *regNo = strtok(NULL, "|");
+            char *password = strtok(NULL, "|");
+            char *name = strtok(NULL, "|");
+            char *c_regNo = strtok(NULL, "|");
+            char *position = strtok(NULL, "|");
+
+            if (!regNo || !password || !name || !c_regNo || !position) {
+                char *msg = "ERROR: Invalid contestant format";
+                sendto(sock, msg, strlen(msg)+1, 0,
+                       (struct sockaddr *)&client_addr, client_len);
+                continue;
+            }
+
+            if (!verify_admin(regNo, password)) {
+                char *msg = "ERROR: Admin not authenticated";
+                sendto(sock, msg, strlen(msg)+1, 0,
+                       (struct sockaddr *)&client_addr, client_len);
+                continue;
+            }
+
+            save_contestant(name, c_regNo, position);
+            char *msg = "SUCCESS: Contestant registered";
+            sendto(sock, msg, strlen(msg)+1, 0,
+                   (struct sockaddr *)&client_addr, client_len);
+        }
+
+        /* =====================================================
+         * TALLY VOTES
+         * ===================================================== */
+        else if (strcmp(command, "TALLY_VOTES") == 0) {
+            char *regNo = strtok(NULL, "|");
+            char *password = strtok(NULL, "|");
+
+            if (!regNo || !password) {
+                char *msg = "ERROR: Invalid tally format";
+                sendto(sock, msg, strlen(msg)+1, 0,
+                       (struct sockaddr *)&client_addr, client_len);
+                continue;
+            }
+
+            if (!verify_admin(regNo, password)) {
+                char *msg = "ERROR: Admin not authenticated";
+                sendto(sock, msg, strlen(msg)+1, 0,
+                       (struct sockaddr *)&client_addr, client_len);
+                continue;
+            }
+
+            char response[2000];
+            get_tally_results(response);
+            sendto(sock, response, strlen(response)+1, 0,
+                   (struct sockaddr *)&client_addr, client_len);
+        }
+
+        /* =====================================================
+         * GET ADMIN INFO
+         * ===================================================== */
+        else if (strcmp(command, "GET_ADMIN_INFO") == 0) {
+            char *regNo = strtok(NULL, "|");
+            char *password = strtok(NULL, "|");
+
+            if (!regNo || !password) {
+                char *msg = "ERROR: Invalid admin info format";
+                sendto(sock, msg, strlen(msg)+1, 0,
+                       (struct sockaddr *)&client_addr, client_len);
+                continue;
+            }
+
+            char response[512];
+            get_admin_info(regNo, password, response);
+            sendto(sock, response, strlen(response)+1, 0,
+                   (struct sockaddr *)&client_addr, client_len);
         }
 
         /* =====================================================
