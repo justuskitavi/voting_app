@@ -25,13 +25,16 @@ typedef enum {
     REQ_TALLY_VOTES       = 60,
     REQ_VIEW_ADMIN_INFO   = 70,
     REQ_ENSURE_ADMIN      = 80,
-    REQ_ADMIN_BACK        = 90
+    REQ_ADMIN_BACK        = 90,
+    REQ_GET_POSITIONS     = 100,
+    REQ_CREATE_ADMIN      = 101
 } RequestType;
 
 typedef enum {
     RESP_SUCCESS = 1,
     RESP_ERROR   = 2,
-    RESP_DATA    = 3
+    RESP_DATA    = 3,
+    RESP_NEED_INPUT = 4
 } ResponseType;
 
 typedef struct {
@@ -44,6 +47,18 @@ typedef struct {
         char regNo[20];
         char password[20];
     } voter_data;
+    struct {
+        char name[50];
+        char regNo[20];
+        char password[20];
+    } admin_data;
+    struct {
+        char name[50];
+        char regNo[20];
+        char position[30];
+    } contestant_data;
+    char positions[1000];     /* Newline-separated positions */
+    int position_choice;      /* Index/choice of position */
 } Msg;
 
 struct Voter      { char name[50]; char regNo[20]; char password[20]; int voted; };
@@ -51,48 +66,10 @@ struct Contestant { char name[50]; char regNo[20]; char position[30]; int votes;
 struct Admin      { char name[50]; char regNo[20]; char password[20]; };
 
 /* ================================================================== */
-/*  Net helpers                                                        */
+/*  Net helpers — STATELESS SERVER: only send responses               */
 /* ================================================================== */
-static void net_print(int sock, const char *fmt, ...)
-{
-    Msg m; va_list ap;
-    memset(&m, 0, sizeof(m));
-    m.type = SVR_DISPLAY;
-    va_start(ap, fmt);
-    vsnprintf(m.text, MAX_PAYLOAD, fmt, ap);
-    va_end(ap);
-    send(sock, &m, sizeof(m), 0);
-}
 
-static void net_gets(int sock, const char *prompt, char *buf, int size)
-{
-    Msg out, in;
-    memset(&out, 0, sizeof(out));
-    out.type = SVR_PROMPT;
-    strncpy(out.text, prompt, MAX_PAYLOAD - 1);
-    send(sock, &out, sizeof(out), 0);
-
-    memset(&in, 0, sizeof(in));
-    if (recv(sock, &in, sizeof(in), 0) <= 0) { buf[0] = '\0'; return; }
-    strncpy(buf, in.text, size - 1);
-    buf[size - 1] = '\0';
-    buf[strcspn(buf, "\n")] = '\0';
-}
-
-static int net_getint(int sock, const char *prompt)
-{
-    char buf[64];
-    net_gets(sock, prompt, buf, sizeof(buf));
-    return atoi(buf);
-}
-
-static void net_pause(int sock, const char *msg_text)
-{
-    char dummy[8];
-    net_gets(sock, msg_text, dummy, sizeof(dummy));
-}
-
-/* Send a final response (resp_status set) back to the client */
+/* Send a response (resp_status and text) back to the client */
 static void net_response(int sock, int status, const char *fmt, ...)
 {
     Msg m; va_list ap;
@@ -106,7 +83,7 @@ static void net_response(int sock, int status, const char *fmt, ...)
 }
 
 /* ================================================================== */
-/*  Admin helpers                                                      */
+/*  Admin helpers — STATELESS                                          */
 /* ================================================================== */
 static int verify_admin_creds(const char *regNo, const char *password)
 {
@@ -128,120 +105,108 @@ static int verify_admin_creds(const char *regNo, const char *password)
     return 0;
 }
 
-/* Prompt over the network and verify — returns 1 on success */
-static int verify_admin(int sock)
+/* Check if admin exists */
+static int admin_exists()
 {
-    char regNo[20], pwd[20];
-    net_gets(sock, "Admin Reg No: ",   regNo, sizeof(regNo));
-    net_gets(sock, "Admin Password: ", pwd,   sizeof(pwd));
-
-    if (verify_admin_creds(regNo, pwd)) return 1;
-
-    net_print(sock, "Invalid admin credentials.\n");
-    return 0;
-}
-
-static void ensure_admin_exists(int sock)
-{
-    FILE *f    = fopen("admin.txt", "r");
-    char  line[256];
-    if (f && fgets(line, sizeof(line), f)) { fclose(f); return; }
-    if (f) fclose(f);
-
-    net_print(sock, "\nNo admin found. Please create an admin account.\n");
-
-    f = fopen("admin.txt", "w");
-    if (!f) { net_print(sock, "Error creating admin file.\n"); return; }
-
-    struct Admin a;
-    net_gets(sock, "Admin Name: ",     a.name,     sizeof(a.name));
-    net_gets(sock, "Admin Reg No: ",   a.regNo,    sizeof(a.regNo));
-    net_gets(sock, "Admin Password: ", a.password, sizeof(a.password));
-    fprintf(f, "%s|%s|%s\n", a.name, a.regNo, a.password);
+    FILE *f = fopen("admin.txt", "r");
+    if (!f) return 0;
+    char line[256];
+    int exists = fgets(line, sizeof(line), f) != NULL;
     fclose(f);
-    net_print(sock, "Admin created successfully.\n");
+    return exists;
 }
 
 /* ================================================================== */
-/*  Admin sub-functions                                                */
+/*  Admin sub-functions — STATELESS: process received data only       */
 /* ================================================================== */
-static void manage_positions(int sock)
+static void manage_positions(int sock, const Msg *req)
 {
-    FILE *f = fopen("positions.txt", "a");
-    if (!f) { net_response(sock, RESP_ERROR, "Error opening positions file."); return; }
-
-    net_print(sock, "\n--- Manage Positions ---\n");
-    net_print(sock, "Enter position names (empty line to finish):\n");
-
-    char pos[30];
-    while (1) {
-        net_gets(sock, "Position: ", pos, sizeof(pos));
-        if (strlen(pos) == 0) break;
-        fprintf(f, "%s\n", pos);
-        net_print(sock, "Position '%s' added.\n", pos);
+    if (!req->positions[0]) {
+        net_response(sock, RESP_ERROR, "No positions provided.");
+        return;
     }
+
+    FILE *f = fopen("positions.txt", "w");  /* Overwrite with new list */
+    if (!f) {
+        net_response(sock, RESP_ERROR, "Error opening positions file.");
+        return;
+    }
+
+    /* Parse positions (newline-separated) */
+    char *pos_copy = strdup(req->positions);
+    char *pos = strtok(pos_copy, "\n");
+    while (pos) {
+        if (strlen(pos) > 0)
+            fprintf(f, "%s\n", pos);
+        pos = strtok(NULL, "\n");
+    }
+    free(pos_copy);
     fclose(f);
     net_response(sock, RESP_SUCCESS, "Positions updated successfully.");
 }
 
-static void register_contestant(int sock)
+static void register_contestant(int sock, const Msg *req)
 {
-    char line[256];
-    char positions[100][30];
-    int  posCount = 0;
+    if (!req->contestant_data.name[0] || !req->contestant_data.regNo[0] ||
+        !req->contestant_data.position[0]) {
+        net_response(sock, RESP_ERROR, "Incomplete contestant data.");
+        return;
+    }
 
+    /* Verify position exists */
     FILE *pf = fopen("positions.txt", "r");
-    if (!pf) { net_response(sock, RESP_ERROR, "No positions found. Create positions first."); return; }
+    if (!pf) {
+        net_response(sock, RESP_ERROR, "No positions defined.");
+        return;
+    }
 
-    while (fgets(line, sizeof(line), pf) && posCount < 100) {
+    int pos_found = 0;
+    char line[256];
+    while (fgets(line, sizeof(line), pf)) {
         line[strcspn(line, "\n")] = '\0';
-        if (!strlen(line)) continue;
-        strncpy(positions[posCount], line, 29);
-        positions[posCount][29] = '\0';
-        posCount++;
+        if (strcmp(line, req->contestant_data.position) == 0) {
+            pos_found = 1;
+            break;
+        }
     }
     fclose(pf);
 
-    if (!posCount) { net_response(sock, RESP_ERROR, "No positions defined."); return; }
-
-    struct Contestant c;
-    net_print(sock, "\n--- Contestant Registration ---\n");
-    net_gets(sock, "Name: ",   c.name,  sizeof(c.name));
-    net_gets(sock, "Reg No: ", c.regNo, sizeof(c.regNo));
-
-    /* Display available positions */
-    net_print(sock, "\nAvailable Positions:\n");
-    for (int i = 0; i < posCount; i++)
-        net_print(sock, "%d. %s\n", i + 1, positions[i]);
-
-    int choice = net_getint(sock, "Select position number: ");
-    if (choice < 1 || choice > posCount) {
-        net_response(sock, RESP_ERROR, "Invalid position choice."); return;
+    if (!pos_found) {
+        net_response(sock, RESP_ERROR, "Selected position not found.");
+        return;
     }
-    strncpy(c.position, positions[choice - 1], sizeof(c.position) - 1);
-    c.position[sizeof(c.position) - 1] = '\0';
-    c.votes = 0;
 
+    /* Add contestant */
     FILE *cf = fopen("contestants.txt", "a");
-    if (!cf) { net_response(sock, RESP_ERROR, "Error opening contestants file."); return; }
-    fprintf(cf, "%s|%s|%s|%d\n", c.name, c.regNo, c.position, c.votes);
+    if (!cf) {
+        net_response(sock, RESP_ERROR, "Error opening contestants file.");
+        return;
+    }
+    fprintf(cf, "%s|%s|%s|%d\n", req->contestant_data.name,
+            req->contestant_data.regNo, req->contestant_data.position, 0);
     fclose(cf);
 
     net_response(sock, RESP_SUCCESS,
-        "Contestant '%s' registered for position '%s'.", c.name, c.position);
+        "Contestant '%s' registered for position '%s'.",
+        req->contestant_data.name, req->contestant_data.position);
 }
 
 static void tally_votes(int sock)
 {
     FILE *f = fopen("contestants.txt", "r");
-    if (!f) { net_response(sock, RESP_ERROR, "No contestants found."); return; }
+    if (!f) {
+        net_response(sock, RESP_ERROR, "No contestants found.");
+        return;
+    }
 
     char line[256];
-    int  maxVotes = -1;
+    int maxVotes = -1;
+    char results[MAX_PAYLOAD] = "";
 
-    net_print(sock, "\n--- Election Results ---\n\nVote Counts:\n");
+    /* First pass: collect all + find max */
+    char *temp = malloc(MAX_PAYLOAD);
+    strcpy(temp, "--- Election Results ---\n\nVote Counts:\n");
 
-    /* First pass: print all + find max */
     while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\n")] = '\0';
         char *n  = strtok(line, "|");
@@ -250,14 +215,16 @@ static void tally_votes(int sock)
         char *v  = strtok(NULL, "|");
         if (!n || !r || !p || !v) continue;
         int votes = atoi(v);
-        net_print(sock, "  %-20s (%-10s) for %-20s — %d votes\n",
-                  n, r, p, votes);
+        char entry[256];
+        snprintf(entry, sizeof(entry), "  %-20s (%-10s) for %-20s — %d votes\n",
+                 n, r, p, votes);
+        strcat(temp, entry);
         if (votes > maxVotes) maxVotes = votes;
     }
 
-    /* Second pass: announce winner(s) */
+    /* Second pass: find winners */
     fseek(f, 0, SEEK_SET);
-    net_print(sock, "\nWinner(s):\n");
+    strcat(temp, "\nWinner(s):\n");
     while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\n")] = '\0';
         char *n  = strtok(line, "|");
@@ -265,44 +232,90 @@ static void tally_votes(int sock)
         char *p  = strtok(NULL, "|");
         char *v  = strtok(NULL, "|");
         if (!n || !r || !p || !v) continue;
-        if (atoi(v) == maxVotes)
-            net_print(sock, "  ★ %s (%s) for %s with %d vote(s)\n",
-                      n, r, p, maxVotes);
+        if (atoi(v) == maxVotes) {
+            char winner[256];
+            snprintf(winner, sizeof(winner), "  ★ %s (%s) for %s with %d vote(s)\n",
+                     n, r, p, maxVotes);
+            strcat(temp, winner);
+        }
     }
     fclose(f);
-    net_response(sock, RESP_SUCCESS, "Tally complete.");
+    
+    net_response(sock, RESP_SUCCESS, "%s", temp);
+    free(temp);
 }
 
-static void view_admin_info(int sock)
+static void view_admin_info(int sock, const Msg *req)
 {
-    net_print(sock, "\n--- Admin Info ---\n");
+    if (!req->admin_data.regNo[0] || !req->admin_data.password[0]) {
+        net_response(sock, RESP_ERROR, "Missing credentials.");
+        return;
+    }
 
-    char regNo[20], pwd[20];
-    net_gets(sock, "Admin Reg No: ",   regNo, sizeof(regNo));
-    net_gets(sock, "Admin Password: ", pwd,   sizeof(pwd));
-
-    if (!verify_admin_creds(regNo, pwd)) {
+    if (!verify_admin_creds(req->admin_data.regNo, req->admin_data.password)) {
         net_response(sock, RESP_ERROR, "Invalid admin credentials.");
         return;
     }
 
     FILE *f = fopen("admin.txt", "r");
-    if (!f) { net_response(sock, RESP_ERROR, "Cannot open admin file."); return; }
+    if (!f) {
+        net_response(sock, RESP_ERROR, "Cannot open admin file.");
+        return;
+    }
 
     char line[256];
     while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\n")] = '\0';
         char *name = strtok(line, "|");
         char *rn   = name ? strtok(NULL, "|") : NULL;
-        /* password intentionally not sent back over the wire */
-        if (name && rn && strcmp(rn, regNo) == 0) {
-            net_print(sock, "Name   : %s\n", name);
-            net_print(sock, "Reg No : %s\n", rn);
-            break;
+        if (name && rn && strcmp(rn, req->admin_data.regNo) == 0) {
+            fclose(f);
+            net_response(sock, RESP_SUCCESS, "Name   : %s\nReg No : %s", name, rn);
+            return;
         }
     }
     fclose(f);
-    net_response(sock, RESP_SUCCESS, "Admin info displayed.");
+    net_response(sock, RESP_ERROR, "Admin record not found.");
+}
+
+/* Get list of available positions */
+static void get_positions(int sock)
+{
+    FILE *f = fopen("positions.txt", "r");
+    if (!f) {
+        net_response(sock, RESP_ERROR, "No positions found.");
+        return;
+    }
+
+    char *positions = malloc(MAX_PAYLOAD);
+    positions[0] = '\0';
+    char line[256];
+    int count = 0;
+
+    while (fgets(line, sizeof(line), f) && count < 100) {
+        line[strcspn(line, "\n")] = '\0';
+        if (strlen(line) == 0) continue;
+        if (count > 0) strcat(positions, "\n");
+        strcat(positions, line);
+        count++;
+    }
+    fclose(f);
+
+    if (count == 0) {
+        free(positions);
+        net_response(sock, RESP_ERROR, "No positions defined.");
+        return;
+    }
+
+    Msg resp;
+    memset(&resp, 0, sizeof(resp));
+    resp.type = 99;
+    resp.resp_status = RESP_SUCCESS;
+    resp.position_choice = count;  /* Store count in this field */
+    strncpy(resp.text, positions, MAX_PAYLOAD - 1);
+    send(sock, &resp, sizeof(resp), 0);
+
+    free(positions);
 }
 
 /* ================================================================== */
@@ -347,50 +360,26 @@ static void handle_register_voter(int sock, const Msg *req)
         "Voter '%s' registered successfully!", req->voter_data.name);
 }
 
-/* ================================================================== */
-/*  Admin panel — server side: verify first, then handle sub-requests */
-/* ================================================================== */
-static void handle_admin_panel(int sock)
+/* Admin create (server-side, triggered by REQ_CREATE_ADMIN) */
+static void handle_create_admin(int sock, const Msg *req)
 {
-    net_print(sock, "\n--- Admin Authentication ---\n");
-
-    if (!verify_admin(sock)) {
-        net_response(sock, RESP_ERROR, "Admin authentication failed.");
+    if (!req->admin_data.name[0] || !req->admin_data.regNo[0] ||
+        !req->admin_data.password[0]) {
+        net_response(sock, RESP_ERROR, "Incomplete admin data.");
         return;
     }
 
-    /* Auth succeeded — tell the client */
-    net_response(sock, RESP_SUCCESS, "Admin authenticated successfully.");
-
-    /*
-     * Now wait for sub-menu requests from the client.
-     * The client prints its own menu and sends REQ_* messages.
-     * We serve each one and send a final net_response() back.
-     * The loop ends when the client sends nothing more (disconnects or
-     * picks "Back to Main Menu" — at that point the outer handle_client
-     * loop just waits for the next top-level request).
-     */
-    Msg msg;
-    while (1) {
-        memset(&msg, 0, sizeof(msg));
-        ssize_t n = recv(sock, &msg, sizeof(msg), 0);
-        if (n <= 0) break;  /* client disconnected or went back */
-
-        switch (msg.req_type) {
-        case REQ_MANAGE_POSITIONS: manage_positions(sock);    break;
-        case REQ_REG_CONTESTANT:   register_contestant(sock); break;
-        case REQ_TALLY_VOTES:      tally_votes(sock);         break;
-        case REQ_VIEW_ADMIN_INFO:  view_admin_info(sock);     break;
-        case REQ_ADMIN_BACK:
-            net_response(sock, RESP_SUCCESS, "Returning to main menu.");
-            goto done;
-        default:
-            /* Not an admin sub-request — break back to main loop */
-            net_response(sock, RESP_ERROR, "Invalid admin request.");
-            break;
-        }
+    FILE *f = fopen("admin.txt", "w");
+    if (!f) {
+        net_response(sock, RESP_ERROR, "Error creating admin file.");
+        return;
     }
-done:;
+
+    fprintf(f, "%s|%s|%s\n", req->admin_data.name, req->admin_data.regNo,
+            req->admin_data.password);
+    fclose(f);
+
+    net_response(sock, RESP_SUCCESS, "Admin created successfully.");
 }
 
 /* ================================================================== */
@@ -413,17 +402,47 @@ static void handle_client(int sock)
 
         switch (msg.req_type) {
         case REQ_ENSURE_ADMIN:
-            ensure_admin_exists(sock);
-            /* Send a plain response so pump_until_response() returns */
-            net_response(sock, RESP_SUCCESS, "");
+            if (admin_exists()) {
+                net_response(sock, RESP_SUCCESS, "Admin already exists.");
+            } else {
+                net_response(sock, RESP_NEED_INPUT, "Admin does not exist. Please provide admin data.");
+            }
+            break;
+
+        case REQ_CREATE_ADMIN:
+            handle_create_admin(sock, &msg);
             break;
 
         case REQ_VERIFY_ADMIN:
-            handle_admin_panel(sock);
+            if (verify_admin_creds(msg.admin_data.regNo, msg.admin_data.password)) {
+                net_response(sock, RESP_SUCCESS, "Admin authenticated.");
+            } else {
+                net_response(sock, RESP_ERROR, "Invalid admin credentials.");
+            }
             break;
 
         case REQ_REGISTER_VOTER:
             handle_register_voter(sock, &msg);
+            break;
+
+        case REQ_GET_POSITIONS:
+            get_positions(sock);
+            break;
+
+        case REQ_MANAGE_POSITIONS:
+            manage_positions(sock, &msg);
+            break;
+
+        case REQ_REG_CONTESTANT:
+            register_contestant(sock, &msg);
+            break;
+
+        case REQ_TALLY_VOTES:
+            tally_votes(sock);
+            break;
+
+        case REQ_VIEW_ADMIN_INFO:
+            view_admin_info(sock, &msg);
             break;
 
         default:
