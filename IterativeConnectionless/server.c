@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -146,6 +147,173 @@ void get_admin_info(const char *regNo, const char *pwd, char *response)
 
     fclose(f);
     strcpy(response, "ERROR: Admin not found");
+}
+
+int admin_exists()
+{
+    FILE *f = fopen("admin.txt", "r");
+    if (!f) return 0;
+    char line[256];
+    int exists = fgets(line, sizeof(line), f) != NULL;
+    fclose(f);
+    return exists;
+}
+
+int verify_voter(const char *regNo, const char *pwd)
+{
+    FILE *f = fopen("voters.txt", "r");
+    char line[256];
+
+    if (!f) return 0;
+
+    while (fgets(line, sizeof(line), f)) {
+        char *name = strtok(line, "|");
+        char *r = strtok(NULL, "|");
+        char *p = strtok(NULL, "|");
+
+        if (r && p && strcmp(r, regNo) == 0 && strcmp(p, pwd) == 0) {
+            fclose(f);
+            return 1;
+        }
+    }
+
+    fclose(f);
+    return 0;
+}
+
+int voted_already(const char *voter_regNo)
+{
+    FILE *f = fopen("voters.txt", "r");
+    char line[256];
+
+    if (!f) return 0;
+
+    while (fgets(line, sizeof(line), f)) {
+        char *name = strtok(line, "|");
+        char *r = strtok(NULL, "|");
+        char *pw = strtok(NULL, "|");
+        char *voted = strtok(NULL, "|");
+
+        if (r && strcmp(r, voter_regNo) == 0) {
+            fclose(f);
+            return voted && strcmp(voted, "1") == 0;
+        }
+    }
+
+    fclose(f);
+    return 0;
+}
+
+void update_vote_count(const char *contestant_regNo, char *response)
+{
+    FILE *f = fopen("contestants.txt", "r");
+    FILE *temp = fopen("contestants.tmp", "w");
+    char line[256];
+    int found = 0;
+
+    if (!f || !temp) {
+        strcpy(response, "ERROR: File operation failed");
+        if (f) fclose(f);
+        if (temp) fclose(temp);
+        return;
+    }
+
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = '\0';
+        char *name = strtok(line, "|");
+        char *r = strtok(NULL, "|");
+        char *pos = strtok(NULL, "|");
+        char *votes = strtok(NULL, "|");
+
+        if (r && strcmp(r, contestant_regNo) == 0) {
+            int vote_count = votes ? atoi(votes) + 1 : 1;
+            fprintf(temp, "%s|%s|%s|%d\n", name, r, pos, vote_count);
+            found = 1;
+        } else {
+            fprintf(temp, "%s\n", line);
+        }
+    }
+
+    fclose(f);
+    fclose(temp);
+
+    if (found) {
+        rename("contestants.tmp", "contestants.txt");
+        strcpy(response, "SUCCESS: Vote cast");
+    } else {
+        remove("contestants.tmp");
+        strcpy(response, "ERROR: Contestant not found");
+    }
+}
+
+void mark_voter_voted(const char *voter_regNo)
+{
+    FILE *f = fopen("voters.txt", "r");
+    FILE *temp = fopen("voters.tmp", "w");
+    char line[256];
+
+    if (!f || !temp) {
+        if (f) fclose(f);
+        if (temp) fclose(temp);
+        return;
+    }
+
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = '\0';
+        char *name = strtok(line, "|");
+        char *r = strtok(NULL, "|");
+        char *pw = strtok(NULL, "|");
+
+        if (r && strcmp(r, voter_regNo) == 0) {
+            fprintf(temp, "%s|%s|%s|1\n", name, r, pw);
+        } else {
+            fprintf(temp, "%s\n", line);
+        }
+    }
+
+    fclose(f);
+    fclose(temp);
+    rename("voters.tmp", "voters.txt");
+}
+
+void get_contestants_list(const char *regNo, const char *pwd, char *response)
+{
+    if (!verify_admin(regNo, pwd)) {
+        strcpy(response, "ERROR: Invalid admin credentials");
+        return;
+    }
+
+    FILE *f = fopen("contestants.txt", "r");
+    char line[256];
+    char result[2000] = "--- Registered Contestants ---\n";
+    int count = 0;
+
+    if (!f) {
+        strcpy(response, "ERROR: No contestants registered");
+        return;
+    }
+
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = '\0';
+        char *name = strtok(line, "|");
+        char *regNo_c = strtok(NULL, "|");
+        char *position = strtok(NULL, "|");
+
+        if (name && regNo_c && position) {
+            char entry[256];
+            snprintf(entry, sizeof(entry), "%d. %s (Reg: %s) - Position: %s\n",
+                     ++count, name, regNo_c, position);
+            strcat(result, entry);
+        }
+    }
+
+    fclose(f);
+
+    if (count == 0) {
+        strcpy(response, "ERROR: No contestants registered");
+    } else {
+        strcpy(response, result);
+    }
 }
 
 /* =========================================================
@@ -351,6 +519,118 @@ int main(void)
 
             char response[512];
             get_admin_info(regNo, password, response);
+            sendto(sock, response, strlen(response)+1, 0,
+                   (struct sockaddr *)&client_addr, client_len);
+        }
+
+        /* =====================================================
+         * CHECK ADMIN EXISTS
+         * ===================================================== */
+        else if (strcmp(command, "CHECK_ADMIN") == 0) {
+            if (admin_exists()) {
+                char *msg = "EXISTS";
+                sendto(sock, msg, strlen(msg)+1, 0,
+                       (struct sockaddr *)&client_addr, client_len);
+            } else {
+                char *msg = "NOT_EXISTS";
+                sendto(sock, msg, strlen(msg)+1, 0,
+                       (struct sockaddr *)&client_addr, client_len);
+            }
+        }
+
+        /* =====================================================
+         * CREATE ADMIN
+         * ===================================================== */
+        else if (strcmp(command, "CREATE_ADMIN") == 0) {
+            char *name = strtok(NULL, "|");
+            char *regNo = strtok(NULL, "|");
+            char *password = strtok(NULL, "|");
+
+            if (!name || !regNo || !password) {
+                char *msg = "ERROR: Invalid admin format";
+                sendto(sock, msg, strlen(msg)+1, 0,
+                       (struct sockaddr *)&client_addr, client_len);
+                continue;
+            }
+
+            if (admin_exists()) {
+                char *msg = "ERROR: Admin already exists";
+                sendto(sock, msg, strlen(msg)+1, 0,
+                       (struct sockaddr *)&client_addr, client_len);
+                continue;
+            }
+
+            FILE *f = fopen("admin.txt", "w");
+            if (!f) {
+                char *msg = "ERROR: Cannot create admin";
+                sendto(sock, msg, strlen(msg)+1, 0,
+                       (struct sockaddr *)&client_addr, client_len);
+                continue;
+            }
+
+            fprintf(f, "%s|%s|%s\n", name, regNo, password);
+            fclose(f);
+
+            char *msg = "SUCCESS: Admin created";
+            sendto(sock, msg, strlen(msg)+1, 0,
+                   (struct sockaddr *)&client_addr, client_len);
+        }
+
+        /* =====================================================
+         * VIEW CONTESTANTS
+         * ===================================================== */
+        else if (strcmp(command, "VIEW_CONTESTANTS") == 0) {
+            char *regNo = strtok(NULL, "|");
+            char *password = strtok(NULL, "|");
+
+            if (!regNo || !password) {
+                char *msg = "ERROR: Invalid format";
+                sendto(sock, msg, strlen(msg)+1, 0,
+                       (struct sockaddr *)&client_addr, client_len);
+                continue;
+            }
+
+            char response[2000];
+            get_contestants_list(regNo, password, response);
+            sendto(sock, response, strlen(response)+1, 0,
+                   (struct sockaddr *)&client_addr, client_len);
+        }
+
+        /* =====================================================
+         * CAST VOTE
+         * ===================================================== */
+        else if (strcmp(command, "CAST_VOTE") == 0) {
+            char *voter_regNo = strtok(NULL, "|");
+            char *voter_pwd = strtok(NULL, "|");
+            char *contestant_regNo = strtok(NULL, "|");
+
+            if (!voter_regNo || !voter_pwd || !contestant_regNo) {
+                char *msg = "ERROR: Invalid vote format";
+                sendto(sock, msg, strlen(msg)+1, 0,
+                       (struct sockaddr *)&client_addr, client_len);
+                continue;
+            }
+
+            if (!verify_voter(voter_regNo, voter_pwd)) {
+                char *msg = "ERROR: Invalid voter credentials";
+                sendto(sock, msg, strlen(msg)+1, 0,
+                       (struct sockaddr *)&client_addr, client_len);
+                continue;
+            }
+
+            if (voted_already(voter_regNo)) {
+                char *msg = "ERROR: You have already voted";
+                sendto(sock, msg, strlen(msg)+1, 0,
+                       (struct sockaddr *)&client_addr, client_len);
+                continue;
+            }
+
+            char response[256];
+            update_vote_count(contestant_regNo, response);
+            if (strncmp(response, "SUCCESS", 7) == 0) {
+                mark_voter_voted(voter_regNo);
+            }
+
             sendto(sock, response, strlen(response)+1, 0,
                    (struct sockaddr *)&client_addr, client_len);
         }

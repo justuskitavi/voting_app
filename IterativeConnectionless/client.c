@@ -25,6 +25,9 @@ void managePositions(void);
 void registerContestant(void);
 void tallyVotes(void);
 void displayAdminInfo(void);
+void castVote(void);
+void viewContestants(void);
+void ensureAdminExists(void);
 
 int send_request(const char *request, char *response, size_t response_size)
 {
@@ -78,13 +81,16 @@ int main(void)
 
     printf("\nServer address %s:%d  initialised\n", server_ip, PORT);
 
+    ensureAdminExists();
+
     while (1) {
         char choice[20];
 
         printf("\n=== Main Menu ===\n");
         printf("1. Admin Panel\n");
         printf("2. Register Voter\n");
-        printf("3. Exit\n");
+        printf("3. Cast Vote\n");
+        printf("4. Exit\n");
         printf("Enter choice: ");
         fflush(stdout);
 
@@ -128,6 +134,8 @@ int main(void)
                 printf("No response from server.\n");
             }
         } else if (strcmp(choice, "3") == 0) {
+            castVote();
+        } else if (strcmp(choice, "4") == 0) {
             printf("Goodbye!\n");
             break;
         } else {
@@ -205,9 +213,10 @@ void adminPanel(void)
         printf("\nAdmin Options:\n");
         printf("1. Manage Positions\n");
         printf("2. Register Contestant\n");
-        printf("3. Tally Votes\n");
-        printf("4. View Admin Info\n");
-        printf("5. Back to Main Menu\n");
+        printf("3. View Contestants\n");
+        printf("4. Tally Votes\n");
+        printf("5. View Admin Info\n");
+        printf("6. Back to Main Menu\n");
         printf("Enter choice: ");
 
         if (!fgets(choice, sizeof(choice), stdin)) return;
@@ -218,10 +227,12 @@ void adminPanel(void)
         } else if (strcmp(choice, "2") == 0) {
             registerContestant();
         } else if (strcmp(choice, "3") == 0) {
-            tallyVotes();
+            viewContestants();
         } else if (strcmp(choice, "4") == 0) {
-            displayAdminInfo();
+            tallyVotes();
         } else if (strcmp(choice, "5") == 0) {
+            displayAdminInfo();
+        } else if (strcmp(choice, "6") == 0) {
             return;
         } else {
             printf("Invalid choice.\n");
@@ -324,5 +335,98 @@ void tallyVotes(void)
         printf("\n%s\n", response);
     } else {
         printf("No response from server.\n");
+    }
+}
+
+void viewContestants(void)
+{
+    char regNo[20], password[20];
+    char request[BUFFER_SIZE], response[BUFFER_SIZE];
+
+    printf("\n--- View Contestants ---\n");
+    printf("Enter your Admin Reg No: ");
+    if (!fgets(regNo, sizeof(regNo), stdin)) return;
+    regNo[strcspn(regNo, "\n")] = '\0';
+
+    printf("Enter your Admin Password: ");
+    if (!fgets(password, sizeof(password), stdin)) return;
+    password[strcspn(password, "\n")] = '\0';
+
+    snprintf(request, sizeof(request), "VIEW_CONTESTANTS|%s|%s", regNo, password);
+    if (send_request(request, response, sizeof(response))) {
+        printf("\n%s\n", response);
+    } else {
+        printf("No response from server.\n");
+    }
+}
+
+void castVote(void)
+{
+    char voter_regNo[20], voter_pwd[20], contestant_regNo[20];
+    char request[BUFFER_SIZE], response[BUFFER_SIZE];
+
+    printf("\n=== Cast Your Vote ===\n");
+    printf("Your Registration Number: ");
+    if (!fgets(voter_regNo, sizeof(voter_regNo), stdin)) return;
+    voter_regNo[strcspn(voter_regNo, "\n")] = '\0';
+
+    printf("Your Password: ");
+    if (!fgets(voter_pwd, sizeof(voter_pwd), stdin)) return;
+    voter_pwd[strcspn(voter_pwd, "\n")] = '\0';
+
+    /* View candidates first */
+    printf("\nFetching candidates...\n");
+    snprintf(request, sizeof(request), "VIEW_CONTESTANTS|admin|admin");
+    if (send_request(request, response, sizeof(response))) {
+        if (strncmp(response, "ERROR", 5) != 0) {
+            printf("%s\n", response);
+        }
+    }
+
+    printf("\nEnter Registration Number of candidate to vote for: ");
+    if (!fgets(contestant_regNo, sizeof(contestant_regNo), stdin)) return;
+    contestant_regNo[strcspn(contestant_regNo, "\n")] = '\0';
+
+    snprintf(request, sizeof(request), "CAST_VOTE|%s|%s|%s",
+             voter_regNo, voter_pwd, contestant_regNo);
+
+    if (send_request(request, response, sizeof(response))) {
+        printf("\n%s\n", response);
+    } else {
+        printf("No response from server.\n");
+    }
+}
+
+void ensureAdminExists(void)
+{
+    char request[BUFFER_SIZE], response[BUFFER_SIZE];
+
+    snprintf(request, sizeof(request), "CHECK_ADMIN");
+    if (!send_request(request, response, sizeof(response))) {
+        return;
+    }
+
+    if (strcmp(response, "NOT_EXISTS") == 0) {
+        printf("\n=== Admin Setup Required ===\n");
+        char name[50], regNo[20], password[20];
+
+        printf("Admin does not exist. Please create one.\n");
+        printf("Admin Name: ");
+        if (!fgets(name, sizeof(name), stdin)) return;
+        name[strcspn(name, "\n")] = '\0';
+
+        printf("Admin Reg No: ");
+        if (!fgets(regNo, sizeof(regNo), stdin)) return;
+        regNo[strcspn(regNo, "\n")] = '\0';
+
+        printf("Admin Password: ");
+        if (!fgets(password, sizeof(password), stdin)) return;
+        password[strcspn(password, "\n")] = '\0';
+
+        snprintf(request, sizeof(request), "CREATE_ADMIN|%s|%s|%s",
+                 name, regNo, password);
+        if (send_request(request, response, sizeof(response))) {
+            printf("\n%s\n", response);
+        }
     }
 }
