@@ -22,7 +22,8 @@ typedef enum {
     REQ_ENSURE_ADMIN      = 80,
     REQ_ADMIN_BACK        = 90,
     REQ_GET_POSITIONS     = 100,
-    REQ_CREATE_ADMIN      = 101
+    REQ_CREATE_ADMIN      = 101,
+    REQ_VIEW_CONTESTANTS  = 102
 } RequestType;
 
 typedef enum {
@@ -58,6 +59,8 @@ typedef struct {
 
 void ensureAdminExists(int sock);
 void adminPanel(int sock);
+void castVote(int sock);
+void viewContestants(int sock);
 
 
 static Msg receive_response(int sock)
@@ -146,6 +149,66 @@ static int get_positions(int sock, char positions[100][30])
     return count;
 }
 
+void viewContestants(int sock)
+{
+    Msg req;
+    memset(&req, 0, sizeof(req));
+    req.type = 99;
+    req.req_type = REQ_VIEW_CONTESTANTS;
+    
+    send(sock, &req, sizeof(req), 0);
+    Msg resp = receive_response(sock);
+    printf("\n%s\n", resp.text);
+}
+
+void castVote(int sock)
+{
+    printf("\n=== Cast Your Vote ===\n");
+    
+    printf("Your Registration Number: ");
+    fflush(stdout);
+    char voter_regNo[20];
+    if (fgets(voter_regNo, sizeof(voter_regNo), stdin) == NULL)
+        return;
+    voter_regNo[strcspn(voter_regNo, "\n")] = '\0';
+
+    printf("Your Password: ");
+    fflush(stdout);
+    char voter_password[20];
+    if (fgets(voter_password, sizeof(voter_password), stdin) == NULL)
+        return;
+    voter_password[strcspn(voter_password, "\n")] = '\0';
+
+    /* First, view contestants */
+    printf("\n--- Available Candidates ---\n");
+    Msg view_req;
+    memset(&view_req, 0, sizeof(view_req));
+    view_req.type = 99;
+    view_req.req_type = REQ_VIEW_CONTESTANTS;
+    send(sock, &view_req, sizeof(view_req), 0);
+    Msg view_resp = receive_response(sock);
+    printf("%s\n", view_resp.text);
+
+    printf("\nEnter Registration Number of candidate to vote for: ");
+    fflush(stdout);
+    char contestant_regNo[20];
+    if (fgets(contestant_regNo, sizeof(contestant_regNo), stdin) == NULL)
+        return;
+    contestant_regNo[strcspn(contestant_regNo, "\n")] = '\0';
+
+    /* Send vote */
+    Msg vote_req;
+    memset(&vote_req, 0, sizeof(vote_req));
+    vote_req.type = 99;
+    vote_req.req_type = REQ_CAST_VOTE;
+    strncpy(vote_req.voter_data.regNo, voter_regNo, sizeof(vote_req.voter_data.regNo) - 1);
+    strncpy(vote_req.voter_data.password, voter_password, sizeof(vote_req.voter_data.password) - 1);
+    strncpy(vote_req.contestant_data.regNo, contestant_regNo, sizeof(vote_req.contestant_data.regNo) - 1);
+
+    Msg vote_resp = send_and_receive(sock, &vote_req);
+    printf("\n%s\n", vote_resp.text);
+}
+
 void adminPanel(int sock)
 {
     printf("\n=== Admin Panel ===\n");
@@ -185,9 +248,10 @@ void adminPanel(int sock)
         printf("\nAdmin Options:\n");
         printf("1. Manage Positions\n");
         printf("2. Register Contestant\n");
-        printf("3. Tally Votes\n");
-        printf("4. View Admin Info\n");
-        printf("5. Back to Main Menu\n");
+        printf("3. View Contestants\n");
+        printf("4. Tally Votes\n");
+        printf("5. View Admin Info\n");
+        printf("6. Back to Main Menu\n");
         printf("Enter choice: ");
         fflush(stdout);
 
@@ -281,6 +345,10 @@ void adminPanel(int sock)
             printf("\n%s\n", cont_resp.text);
 
         } else if (strcmp(choice, "3") == 0) {
+            /* View Contestants */
+            viewContestants(sock);
+
+        } else if (strcmp(choice, "4") == 0) {
             /* Tally Votes */
             Msg tally_req;
             memset(&tally_req, 0, sizeof(tally_req));
@@ -289,7 +357,7 @@ void adminPanel(int sock)
             Msg tally_resp = send_and_receive(sock, &tally_req);
             printf("\n%s\n", tally_resp.text);
 
-        } else if (strcmp(choice, "4") == 0) {
+        } else if (strcmp(choice, "5") == 0) {
             /* View Admin Info */
             Msg info_req;
             memset(&info_req, 0, sizeof(info_req));
@@ -302,7 +370,7 @@ void adminPanel(int sock)
             Msg info_resp = send_and_receive(sock, &info_req);
             printf("\n%s\n", info_resp.text);
 
-        } else if (strcmp(choice, "5") == 0) {
+        } else if (strcmp(choice, "6") == 0) {
             admin_running = 0;
 
         } else {
@@ -354,7 +422,8 @@ int main(void)
         printf("\n=== Main Menu ===\n");
         printf("1. Admin Panel\n");
         printf("2. Register Voter\n");
-        printf("3. Exit\n");
+        printf("3. Cast Vote\n");
+        printf("4. Exit\n");
         printf("Enter choice: ");
         fflush(stdout);
 
@@ -410,6 +479,9 @@ int main(void)
             printf("\n%s\n", resp.text);
 
         } else if (strcmp(choice, "3") == 0) {
+            castVote(sock);
+
+        } else if (strcmp(choice, "4") == 0) {
             printf("Goodbye!\n");
             running = 0;
 

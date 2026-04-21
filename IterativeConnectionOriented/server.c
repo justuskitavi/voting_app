@@ -27,7 +27,8 @@ typedef enum {
     REQ_ENSURE_ADMIN      = 80,
     REQ_ADMIN_BACK        = 90,
     REQ_GET_POSITIONS     = 100,
-    REQ_CREATE_ADMIN      = 101
+    REQ_CREATE_ADMIN      = 101,
+    REQ_VIEW_CONTESTANTS  = 102
 } RequestType;
 
 typedef enum {
@@ -142,7 +143,12 @@ static void manage_positions(int sock, const Msg *req)
     }
     free(pos_copy);
     fclose(f);
-    net_response(sock, RESP_SUCCESS, "Positions updated successfully.");
+    
+    /* Reset contestants.txt when positions change */
+    FILE *cf = fopen("contestants.txt", "w");
+    if (cf) fclose(cf);
+    
+    net_response(sock, RESP_SUCCESS, "Positions updated successfully. All contestants cleared.");
 }
 
 static void register_contestant(int sock, const Msg *req)
@@ -200,8 +206,8 @@ static void tally_votes(int sock)
     }
 
     char line[256];
-    int maxVotes = -1;
-    char results[MAX_PAYLOAD] = "";
+    int maxVotes = 0;
+    int contestant_count = 0;
 
     /* First pass: collect all + find max */
     char *temp = malloc(MAX_PAYLOAD);
@@ -220,11 +226,20 @@ static void tally_votes(int sock)
                  n, r, p, votes);
         strcat(temp, entry);
         if (votes > maxVotes) maxVotes = votes;
+        contestant_count++;
+    }
+
+    if (contestant_count == 0) {
+        free(temp);
+        net_response(sock, RESP_ERROR, "No contestants registered.");
+        fclose(f);
+        return;
     }
 
     /* Second pass: find winners */
     fseek(f, 0, SEEK_SET);
     strcat(temp, "\nWinner(s):\n");
+    int winners_found = 0;
     while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\n")] = '\0';
         char *n  = strtok(line, "|");
@@ -237,10 +252,15 @@ static void tally_votes(int sock)
             snprintf(winner, sizeof(winner), "  ★ %s (%s) for %s with %d vote(s)\n",
                      n, r, p, maxVotes);
             strcat(temp, winner);
+            winners_found++;
         }
     }
-    fclose(f);
     
+    if (winners_found == 0) {
+        strcat(temp, "  No votes cast yet.\n");
+    }
+    
+    fclose(f);
     net_response(sock, RESP_SUCCESS, "%s", temp);
     free(temp);
 }
@@ -316,6 +336,169 @@ static void get_positions(int sock)
     send(sock, &resp, sizeof(resp), 0);
 
     free(positions);
+}
+
+/* View all contestants */
+static void view_contestants(int sock)
+{
+    FILE *f = fopen("contestants.txt", "r");
+    if (!f) {
+        net_response(sock, RESP_ERROR, "No contestants registered.");
+        return;
+    }
+
+    char *output = malloc(MAX_PAYLOAD);
+    strcpy(output, "--- Registered Contestants ---\n\n");
+    char line[256];
+    int count = 0;
+
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = '\0';
+        char *name = strtok(line, "|");
+        char *rn   = name ? strtok(NULL, "|") : NULL;
+        char *pos  = rn   ? strtok(NULL, "|") : NULL;
+        if (!name || !rn || !pos) continue;
+        
+        char entry[256];
+        snprintf(entry, sizeof(entry), "%d. %s (Reg: %s) - Position: %s\n",
+                 ++count, name, rn, pos);
+        if (strlen(output) + strlen(entry) < MAX_PAYLOAD - 1) {
+            strcat(output, entry);
+        }
+    }
+    fclose(f);
+
+    if (count == 0) {
+        strcpy(output, "No contestants registered.");
+    }
+
+    net_response(sock, RESP_SUCCESS, "%s", output);
+    free(output);
+}
+
+/* Cast vote for a contestant */
+static void handle_cast_vote(int sock, const Msg *req)
+{
+    /* Verify voter credentials */
+    if (!req->voter_data.regNo[0] || !req->voter_data.password[0]) {
+        net_response(sock, RESP_ERROR, "Missing voter credentials.");
+        return;
+    }
+
+    if (!req->contestant_data.regNo[0]) {
+        net_response(sock, RESP_ERROR, "Invalid contestant selection.");
+        return;
+    }
+
+    /* Check if voter exists and hasn't voted yet */
+    FILE *vf = fopen("voters.txt", "r");
+    if (!vf) {
+        net_response(sock, RESP_ERROR, "Voter not found.");
+        return;
+    }
+
+    int voter_found = 0, already_voted = 0;
+    char line[256];
+    while (fgets(line, sizeof(line), vf)) {
+        line[strcspn(line, "\n")] = '\0';
+        char *name = strtok(line, "|");
+        char *rn   = name ? strtok(NULL, "|") : NULL;
+        char *pw   = rn   ? strtok(NULL, "|") : NULL;
+        char *voted = pw  ? strtok(NULL, "|") : NULL;
+        
+        if (rn && strcmp(rn, req->voter_data.regNo) == 0) {
+            voter_found = 1;
+            if (voted && strcmp(voted, "1") == 0) {
+                already_voted = 1;
+            }
+            if (pw && strcmp(pw, req->voter_data.password) != 0) {
+                fclose(vf);
+                net_response(sock, RESP_ERROR, "Invalid voter credentials.");
+                return;
+            }
+            break;
+        }
+    }
+    fclose(vf);
+
+    if (!voter_found) {
+        net_response(sock, RESP_ERROR, "Voter not registered. Please register first.");
+        return;
+    }
+
+    if (already_voted) {
+        net_response(sock, RESP_ERROR, "You have already voted.");
+        return;
+    }
+
+    /* Update contestant vote count */
+    FILE *cf = fopen("contestants.txt", "r");
+    if (!cf) {
+        net_response(sock, RESP_ERROR, "No contestants found.");
+        return;
+    }
+
+    FILE *temp_f = fopen("contestants.tmp", "w");
+    if (!temp_f) {
+        fclose(cf);
+        net_response(sock, RESP_ERROR, "Error processing vote.");
+        return;
+    }
+
+    int vote_updated = 0;
+    while (fgets(line, sizeof(line), cf)) {
+        line[strcspn(line, "\n")] = '\0';
+        char *name = strtok(line, "|");
+        char *rn   = name ? strtok(NULL, "|") : NULL;
+        char *pos  = rn   ? strtok(NULL, "|") : NULL;
+        char *votes = pos ? strtok(NULL, "|") : NULL;
+        
+        if (rn && strcmp(rn, req->contestant_data.regNo) == 0) {
+            int vote_count = votes ? atoi(votes) + 1 : 1;
+            fprintf(temp_f, "%s|%s|%s|%d\n", name, rn, pos, vote_count);
+            vote_updated = 1;
+        } else {
+            fprintf(temp_f, "%s\n", line);
+        }
+    }
+    fclose(cf);
+    fclose(temp_f);
+
+    if (!vote_updated) {
+        remove("contestants.tmp");
+        net_response(sock, RESP_ERROR, "Contestant not found.");
+        return;
+    }
+
+    rename("contestants.tmp", "contestants.txt");
+
+    /* Mark voter as voted */
+    vf = fopen("voters.txt", "r");
+    temp_f = fopen("voters.tmp", "w");
+    if (!vf || !temp_f) {
+        net_response(sock, RESP_ERROR, "Error updating voter status.");
+        if (vf) fclose(vf);
+        if (temp_f) fclose(temp_f);
+        return;
+    }
+
+    while (fgets(line, sizeof(line), vf)) {
+        line[strcspn(line, "\n")] = '\0';
+        char *name = strtok(line, "|");
+        char *rn   = name ? strtok(NULL, "|") : NULL;
+        char *pw   = rn   ? strtok(NULL, "|") : NULL;
+        
+        if (rn && strcmp(rn, req->voter_data.regNo) == 0) {
+            fprintf(temp_f, "%s|%s|%s|1\n", name, rn, pw);
+        } else {
+            fprintf(temp_f, "%s\n", line);
+        }
+    }
+    fclose(vf);
+    fclose(temp_f);
+    rename("voters.tmp", "voters.txt");
+
+    net_response(sock, RESP_SUCCESS, "Vote cast successfully!");
 }
 
 /* ================================================================== */
@@ -443,6 +626,18 @@ static void handle_client(int sock)
 
         case REQ_VIEW_ADMIN_INFO:
             view_admin_info(sock, &msg);
+            break;
+
+        case REQ_VIEW_CONTESTANTS:
+            view_contestants(sock);
+            break;
+
+        case REQ_CAST_VOTE:
+            handle_cast_vote(sock, &msg);
+            break;
+
+        case REQ_ADMIN_BACK:
+            net_response(sock, RESP_SUCCESS, "Returning to main menu.");
             break;
 
         default:
