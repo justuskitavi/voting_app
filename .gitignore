@@ -10,3 +10,4 @@ server
 /IterativeConnectionOriented/client_check
 
 *.txt
+*.lock
